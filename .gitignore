@@ -1,0 +1,7 @@
+/target
+.claude/
+config.toml
+logs/
+temp/
+Cargo.lock
+src/device/

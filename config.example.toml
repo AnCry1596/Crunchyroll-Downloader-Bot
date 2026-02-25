@@ -1,0 +1,91 @@
+# Crunchyroll Downloader Telegram Bot Configuration
+
+[telegram]
+# Your Telegram bot token from @BotFather
+bot_token = "YOUR_BOT_TOKEN_HERE"
+
+# Owner users - full control (add/remove admins, authorize chats)
+# Owners and admins can always use the bot in private chat
+# Use /addadmin and /authorize to manage access via bot commands
+# Format: "id:@username" or just id (e.g., ["123456789:@YourUsername"] or [123456789])
+# Get your user ID from @userinfobot
+owner_users = []
+
+# Chat ID of the group/channel used to store uploaded files for caching
+# The bot must be an admin in this group/channel
+storage_chat_id = -1002386542694
+
+# Optional: Custom Telegram Bot API URL (for local Bot API server)
+# Leave empty to use the default Telegram API
+# Example: "http://127.0.0.1:8081" for local telegram-bot-api server
+api_url = ""
+
+[crunchyroll]
+# Your Crunchyroll account credentials
+email = "your@email.com"
+password = "your_password"
+
+# Locale for content (e.g., "en-US", "ja-JP")
+locale = "en-US"
+
+# Preferred audio languages in order of preference
+preferred_audio = ["ja-JP", "en-US"]
+
+[download]
+# Temporary directory for downloads
+temp_dir = "./temp"
+
+# Output directory for completed downloads
+output_dir = "./downloads"
+
+# Maximum concurrent segment downloads (recommended: 4-8)
+max_concurrent = 8
+
+# Upload preference: "telegram" or "service"
+# - telegram (default): Upload to Telegram, but if file > 1.99GB, automatically use service
+# - service: Always upload to external service (Buzzheavier/Pixeldrain/Gofile)
+upload_preference = "telegram"
+
+# Preferred upload service when using external services: "buzzheavier", "pixeldrain", or "gofile"
+# This determines which service to try first (others are used as fallback)
+preferred_upload_service = "buzzheavier"
+
+# Optional: Pixeldrain API key for uploading files and getting download links
+# Get your API key from https://pixeldrain.com/user/api_keys
+pixeldrain_api_key = ""
+
+# Optional: Buzzheavier account ID for file uploads
+# Files expire after 8 days on Buzzheavier
+buzzheavier_account_id = ""
+
+# Optional: Buzzheavier parent folder ID to organize uploads
+buzzheavier_parent_id = ""
+
+# Optional: Gofile token for file uploads
+gofile_token = ""
+
+[widevine]
+# Path to your Widevine client_id.bin file
+client_id_path = "src/device/client_id.bin"
+
+# Path to your Widevine private_key.pem file
+private_key_path = "src/device/private_key.pem"
+
+[database]
+connection_string = "your_mongodb_connection_string"
+db_name = "your_database_name"
+
+# Proxy settings (optional)
+# Format: "socks5h://username:password@host:port" or "http://host:port"
+# Support for HTTP, HTTPS, SOCKS4, SOCKS4A, SOCKS5, SOCKS5H
+# Leave empty to disable proxy
+[proxy]
+# Main proxy - if set, ALL traffic uses this instead of direct connection
+# Use this if your server IP is blocked or you want all traffic proxied
+main_proxy = ""
+
+# US proxy for US-specific content (search, seasons use US token)
+us_proxy = ""
+
+# SEA proxy for SEA-specific content
+sea_proxy = ""

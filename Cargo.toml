@@ -1,0 +1,72 @@
+[package]
+name = "crunchyroll-downloader-telegram-bot"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# HTTP client (existing)
+wreq = { version = "6.0.0-rc.27", features = ["socks", "json", "multipart", "hickory-dns", "charset", "cookies", "gzip", "brotli", "zstd", "deflate", "tracing", "query", "form"] }
+wreq-util = { version = "3.0.0-rc.9", features = ["emulation", "emulation-compression", "emulation-serde", "emulation-rand"] }
+
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+futures = "0.3"
+
+# Telegram bot
+teloxide = { version = "0.17", features = ["macros"] }
+
+# Widevine DRM
+widevine = "0.1"
+
+# DASH/HLS parsing
+dash-mpd = { version = "0.19", default-features = false }
+m3u8-rs = "6"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Crypto
+rsa = "0.9"
+aes = "0.8"
+cbc = "0.1"
+base64 = "0.22"
+hex = "0.4"
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# Utilities
+url = "2.5"
+urlencoding = "2.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4"] }
+tempfile = "3.14"
+async-trait = "0.1"
+regex-lite = "0.1"
+
+# Archive extraction (for auto-downloading tools)
+zip = "7.2"
+tar = "0.4"
+xz2 = "0.1"
+flate2 = "1.0"
+
+# MongoDB
+mongodb = "3.2"
+
+# BSON with chrono support
+bson = { version = "2.14", features = ["chrono-0_4"] }
+tokio-util = { version = "0.7.18", features = ["io"] }
+futures-util = "0.3"
+
+[patch.crates-io]
+wreq = { git = "https://github.com/0x676e67/wreq" }
+wreq-util = { git = "https://github.com/0x676e67/wreq-util" }
+teloxide = { git = "https://github.com/AnCry1596/teloxide" }
