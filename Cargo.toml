@@ -67,6 +67,6 @@ tokio-util = { version = "0.7.18", features = ["io"] }
 futures-util = "0.3"
 
 [patch.crates-io]
-wreq = { git = "https://github.com/0x676e67/wreq" }
-wreq-util = { git = "https://github.com/0x676e67/wreq-util" }
+wreq = { git = "https://github.com/0x676e67/wreq", rev = "2c51823" }
+wreq-util = { git = "https://github.com/0x676e67/wreq-util", rev = "fb70264" }
 teloxide = { git = "https://github.com/AnCry1596/teloxide" }
