@@ -31,7 +31,12 @@ impl AuthManager {
             .post(api_url(AUTH_TOKEN))
             .header("Authorization", format!("Basic {}", BASIC_AUTH))
             .header("User-Agent", USER_AGENT)
-            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header("Accept", "application/json")
+            .header("Accept-Charset", "UTF-8")
+            .header("Accept-Encoding", "gzip")
+            .header("Connection", "Keep-Alive")
+            .header("Request-Type", "SignIn")
             .form(&[
                 ("username", self.email.as_str()),
                 ("password", self.password.as_str()),
@@ -78,7 +83,11 @@ impl AuthManager {
             .post(api_url(AUTH_TOKEN))
             .header("Authorization", format!("Basic {}", BASIC_AUTH))
             .header("User-Agent", USER_AGENT)
-            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header("Accept", "application/json")
+            .header("Accept-Charset", "UTF-8")
+            .header("Accept-Encoding", "gzip")
+            .header("Connection", "Keep-Alive")
             .form(&[
                 ("grant_type", "client_id"),
                 ("scope", "offline_access"),
@@ -126,7 +135,11 @@ impl AuthManager {
             .post(api_url(AUTH_TOKEN))
             .header("Authorization", format!("Basic {}", BASIC_AUTH))
             .header("User-Agent", USER_AGENT)
-            .header("Content-Type", "application/x-www-form-urlencoded")
+            .header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
+            .header("Accept", "application/json")
+            .header("Accept-Charset", "UTF-8")
+            .header("Accept-Encoding", "gzip")
+            .header("Connection", "Keep-Alive")
             .form(&[
                 ("refresh_token", refresh_token.as_str()),
                 ("grant_type", "refresh_token"),

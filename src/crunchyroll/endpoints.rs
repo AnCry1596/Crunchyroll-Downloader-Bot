@@ -6,19 +6,19 @@ pub const BETA_API_BASE: &str = "https://beta-api.crunchyroll.com";
 pub const PLAYBACK_BASE: &str = "https://cr-play-service.prd.crunchyrollsvc.com/v3";
 pub const PLAYBACK_WEB_BASE: &str = "https://www.crunchyroll.com/playback/v2";
 
-// Auth endpoint
+// Auth endpoint (on www.crunchyroll.com)
 pub const AUTH_TOKEN: &str = "/auth/v1/token";
 
-// Content endpoints
+// Content endpoints (on beta-api.crunchyroll.com)
 pub const CMS_BASE: &str = "/content/v2/cms";
 pub const DISCOVER_BASE: &str = "/content/v2/discover";
 
 // License endpoint
-pub const LICENSE_WIDEVINE: &str = "https://www.crunchyroll.com/license/v1/license/widevine";
+pub const LICENSE_WIDEVINE: &str = "https://cr-license-proxy.prd.crunchyrollsvc.com/v1/license/widevine";
 
-// Android TV device credentials (from C# source)
-pub const BASIC_AUTH: &str = "ZGsxYndzemRyc3lkeTR1N2xvenE6bDl0SU1BdTlzTGc4ZjA4ajlfQkQ4eWZmQmZTSms0R0o=";
-pub const USER_AGENT: &str = "ANDROIDTV/3.47.0_22277 Android/16";
+// Android TV device credentials
+pub const BASIC_AUTH: &str = "eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI=";
+pub const USER_AGENT: &str = "Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 12; en-US; SHIELD Android TV Build/SR1A.211012.001)";
 pub const DEVICE_TYPE: &str = "Android TV";
 pub const DEVICE_NAME: &str = "Android TV";
 
@@ -31,19 +31,19 @@ pub const PLAYBACK_ANDROID_TV: &str = "tv/android_tv";
 pub const PLAYBACK_FIREFOX: &str = "web/firefox";
 pub const PLAYBACK_WEB_CHROME: &str = "web/chrome";
 
-/// Build full API URL
+/// Build full API URL (auth - on beta-api.crunchyroll.com)
 pub fn api_url(path: &str) -> String {
-    format!("{}{}", API_BASE, path)
+    format!("{}{}", BETA_API_BASE, path)
 }
 
-/// Build CMS URL
+/// Build CMS URL (content - on beta-api.crunchyroll.com)
 pub fn cms_url(path: &str) -> String {
-    format!("{}{}{}", API_BASE, CMS_BASE, path)
+    format!("{}{}{}", BETA_API_BASE, CMS_BASE, path)
 }
 
-/// Build discover URL
+/// Build discover URL (content - on beta-api.crunchyroll.com)
 pub fn discover_url(path: &str) -> String {
-    format!("{}{}{}", API_BASE, DISCOVER_BASE, path)
+    format!("{}{}{}", BETA_API_BASE, DISCOVER_BASE, path)
 }
 
 /// Build playback URL for an episode (EVS3 format - cr-play-service)
