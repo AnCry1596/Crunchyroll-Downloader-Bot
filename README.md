@@ -1,11 +1,15 @@
 # Crunchyroll Downloader Telegram Bot
 
+[![Release](https://img.shields.io/github/v/release/AnCry1596/Crunchyroll-Downloader-Bot)](https://github.com/AnCry1596/Crunchyroll-Downloader-Bot/releases/latest)
+[![Build](https://img.shields.io/github/actions/workflow/status/AnCry1596/Crunchyroll-Downloader-Bot/release.yml)](https://github.com/AnCry1596/Crunchyroll-Downloader-Bot/actions)
+[![License: WTFPL](https://img.shields.io/badge/license-WTFPL-brightgreen)](LICENSE)
+
 A Telegram bot written in Rust that downloads Crunchyroll anime episodes with Widevine DRM decryption and uploads them to Telegram or external file hosting services.
 
 ## Features
 
 - Download Crunchyroll anime episodes via Telegram commands
-- Widevine DRM decryption (DASH/HLS streams)
+- Widevine DRM decryption (DASH streams)
 - Automatic upload to Telegram (up to ~2GB) or external services for larger files
 - External upload services: [Buzzheavier](https://buzzheavier.com), [Pixeldrain](https://pixeldrain.com), [Gofile](https://gofile.io)
 - Multi-language audio support with preferred audio track selection
@@ -13,9 +17,17 @@ A Telegram bot written in Rust that downloads Crunchyroll anime episodes with Wi
 - Proxy support (HTTP, SOCKS4/5) for geo-restricted content
 - Owner/admin permission system with per-chat authorization
 
+## Download
+
+Pre-built binaries are available on the [Releases](https://github.com/AnCry1596/Crunchyroll-Downloader-Bot/releases/latest) page:
+
+| Platform | Binary |
+|---|---|
+| Linux x86_64 | `crunchyroll-downloader-bot-linux-x86_64` |
+| Windows x86_64 | `crunchyroll-downloader-bot-windows-x86_64.exe` |
+
 ## Requirements
 
-- [Rust](https://rustup.rs/) (stable)
 - [MongoDB](https://www.mongodb.com/) instance
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
 - A Crunchyroll account
@@ -25,13 +37,14 @@ A Telegram bot written in Rust that downloads Crunchyroll anime episodes with Wi
 
 ## Setup
 
-1. Clone the repository:
+1. Download the binary for your platform from [Releases](https://github.com/AnCry1596/Crunchyroll-Downloader-Bot/releases/latest), or build from source:
    ```bash
    git clone https://github.com/AnCry1596/Crunchyroll-Downloader-Bot.git
    cd Crunchyroll-Downloader-Bot
+   cargo build --release
    ```
 
-2. Copy the example config and fill in your values:
+2. Download `config.example.toml` from the release and copy it:
    ```bash
    cp config.example.toml config.toml
    ```
@@ -40,14 +53,18 @@ A Telegram bot written in Rust that downloads Crunchyroll anime episodes with Wi
    - Set your Telegram `bot_token` and `owner_users`
    - Set your Crunchyroll `email` and `password`
    - Set your MongoDB `connection_string` and `db_name`
-   - Place your Widevine `client_id.bin` and `private_key.pem` in `src/device/` and set the paths
+   - Place your Widevine `client_id.bin` and `private_key.pem` and set the paths
    - (Optional) Add API keys for Pixeldrain, Buzzheavier, or Gofile
    - (Optional) Configure proxies for geo-restricted regions
 
-4. Build and run:
+4. Run:
    ```bash
-   cargo build --release
-   ./target/release/crunchyroll-downloader-telegram-bot
+   # Linux
+   chmod +x crunchyroll-downloader-bot-linux-x86_64
+   ./crunchyroll-downloader-bot-linux-x86_64
+
+   # Windows
+   crunchyroll-downloader-bot-windows-x86_64.exe
    ```
 
 ## Configuration
