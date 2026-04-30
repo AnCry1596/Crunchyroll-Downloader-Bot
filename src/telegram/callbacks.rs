@@ -1016,9 +1016,8 @@ async fn handle_download_start_with_audio(
 
         match download_result {
             Ok(result) => {
-                const MAX_TELEGRAM_SIZE_BYTES: u64 = 2000u64 * 1024 * 1024;
-                // const MAX_TELEGRAM_SIZE_BYTES: u64 = 1;
-                let is_large_file = result.size > MAX_TELEGRAM_SIZE_BYTES;
+                let max_telegram_size = bot_state.telegram_max_upload_bytes;
+                let is_large_file = result.size > max_telegram_size;
                 let prefer_service = upload_preference == crate::config::UploadPreference::Service;
                 // Use service if: file is too large for Telegram OR user prefers service upload
                 let should_use_service = is_large_file || prefer_service;

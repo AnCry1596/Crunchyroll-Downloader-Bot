@@ -58,6 +58,9 @@ pub struct BotState {
     download_subscribers: RwLock<HashMap<String, Vec<DownloadSubscriber>>>,
     /// Pending audio language selections per user+episode (key: "user_id:episode_id")
     audio_selections: RwLock<HashMap<String, AudioSelectionState>>,
+    /// Maximum file size for direct Telegram upload (bytes)
+    /// 50MB if no api_url, 100MB if behind Cloudflare, 2048MB if own server
+    pub telegram_max_upload_bytes: u64,
 }
 
 impl BotState {
@@ -67,6 +70,7 @@ impl BotState {
         tool_manager: ToolManager,
         config: Config,
         database: Option<Database>,
+        telegram_max_upload_bytes: u64,
     ) -> Self {
         Self {
             cr_client,
@@ -79,6 +83,7 @@ impl BotState {
             season_title_cache: RwLock::new(HashMap::new()),
             download_subscribers: RwLock::new(HashMap::new()),
             audio_selections: RwLock::new(HashMap::new()),
+            telegram_max_upload_bytes,
         }
     }
 
@@ -255,6 +260,45 @@ impl BotState {
     }
 }
 
+/// Detect the max file size allowed for direct Telegram upload based on the api_url:
+/// - None (official API): 50 MB
+/// - api_url behind Cloudflare (cf-ray or server: cloudflare headers): 100 MB
+/// - api_url on own server: 2048 MB
+async fn detect_telegram_upload_limit(api_url: Option<&str>) -> u64 {
+    const MB: u64 = 1024 * 1024;
+    let Some(url) = api_url else {
+        tracing::info!("No custom Telegram API URL — upload limit: 50 MB");
+        return 50 * MB;
+    };
+
+    // Probe the server for Cloudflare headers
+    match wreq::Client::builder().build() {
+        Ok(client) => {
+            match client.head(url).send().await {
+                Ok(resp) => {
+                    let headers = resp.headers();
+                    let is_cloudflare = headers.contains_key("cf-ray")
+                        || headers.get("server").and_then(|v| v.to_str().ok())
+                            .map(|s| s.to_lowercase().contains("cloudflare"))
+                            .unwrap_or(false);
+                    if is_cloudflare {
+                        tracing::info!("Telegram API URL is behind Cloudflare — upload limit: 100 MB");
+                        100 * MB
+                    } else {
+                        tracing::info!("Telegram API URL is own server — upload limit: 2048 MB");
+                        2048 * MB
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Could not probe Telegram API URL for Cloudflare detection: {} — defaulting to 2048 MB", e);
+                    2048 * MB
+                }
+            }
+        }
+        Err(_) => 2048 * MB,
+    }
+}
+
 /// Run the Telegram bot
 pub async fn run_bot(config: Config) -> Result<()> {
     tracing::info!("Starting Telegram bot...");
@@ -339,6 +383,9 @@ pub async fn run_bot(config: Config) -> Result<()> {
 
     let download_manager = DownloadManager::new(http, cdm, config.download.clone(), database.clone());
 
+    // Detect Telegram upload size limit based on api_url / Cloudflare presence
+    let telegram_max_upload_bytes = detect_telegram_upload_limit(config.telegram.api_url.as_deref()).await;
+
     // Create shared state
     let state = Arc::new(BotState::new(
         cr_client,
@@ -346,6 +393,7 @@ pub async fn run_bot(config: Config) -> Result<()> {
         tool_manager,
         config,
         database,
+        telegram_max_upload_bytes,
     ));
 
     // Set bot commands menu
