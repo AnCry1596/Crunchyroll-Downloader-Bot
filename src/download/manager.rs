@@ -200,8 +200,13 @@ impl DownloadManager {
             video_rep.bandwidth
         );
 
-        // Estimate file size
-        let video_duration_secs = parsed.duration_secs().unwrap_or(1500.0);
+        // Estimate file size — prefer manifest duration, then episode metadata, then segment count
+        let video_duration_secs = parsed.duration_secs()
+            .or_else(|| task.episode.duration_ms.map(|ms| ms as f64 / 1000.0))
+            .unwrap_or_else(|| {
+                // Last resort: count segments × 6s average segment duration
+                video_rep.segments.len() as f64 * 6.0
+            });
         let audio_rep = parsed.best_audio();
         let video_est_bytes = (video_rep.bandwidth as f64 / 8.0 * video_duration_secs) as u64;
         let audio_est_bytes = audio_rep
@@ -298,7 +303,7 @@ impl DownloadManager {
             retry_count: 3,
             retry_delay_ms: 1000,
         };
-        let segment_downloader = SegmentDownloader::new(self.http.clone(), segment_config);
+        let segment_downloader = SegmentDownloader::new_with_cancelled(self.http.clone(), segment_config, self.cancelled.clone());
 
         // Download video segments
         tracing::info!("Downloading video segments ({} total)", video_rep.segments.len());
@@ -651,7 +656,7 @@ impl DownloadManager {
             retry_count: 3,
             retry_delay_ms: 1000,
         };
-        let segment_downloader = SegmentDownloader::new(self.http.clone(), segment_config);
+        let segment_downloader = SegmentDownloader::new_with_cancelled(self.http.clone(), segment_config, self.cancelled.clone());
 
         let audio_segments = segment_downloader
             .download_representation(audio_rep, &audio_segments_dir, progress.clone(), DownloadPhase::DownloadingAudio)

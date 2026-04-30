@@ -610,7 +610,7 @@ async fn handle_audio_download_confirm(
     // Call handle_download_start with the pre-built additional audio versions
     handle_download_start_with_audio(
         bot, chat_id, msg_id, reply_to_msg_id, episode_id, user_id, state,
-        false, additional_audio_versions, primary_audio_locale,
+        false, additional_audio_versions, primary_audio_locale, true,
     ).await
 }
 
@@ -626,7 +626,7 @@ async fn handle_download_start(
 ) -> ResponseResult<()> {
     handle_download_start_with_audio(
         bot, chat_id, msg_id, reply_to_msg_id, episode_id, user_id, state,
-        use_pixeldrain, Vec::new(), None,
+        use_pixeldrain, Vec::new(), None, false,
     ).await
 }
 
@@ -641,6 +641,7 @@ async fn handle_download_start_with_audio(
     use_pixeldrain: bool,
     extra_audio_versions: Vec<AudioVersionInfo>,
     extra_primary_locale: Option<String>,
+    audio_already_selected: bool,
 ) -> ResponseResult<()> {
     tracing::info!("handle_download_start: episode_id={}, use_pixeldrain={}, has_database={}, extra_audio={}",
         episode_id, use_pixeldrain, state.database.is_some(), extra_audio_versions.len());
@@ -827,9 +828,8 @@ async fn handle_download_start_with_audio(
     };
 
     // Check if multiple audio versions are available - show selection UI
-    // Only show if user hasn't already selected audio (extra_audio_versions would be non-empty)
-    // Use episode.versions (from CMS API) as primary source, fallback to playback.versions
-    if extra_audio_versions.is_empty() {
+    // Skip if user already went through audio selection
+    if !audio_already_selected && extra_audio_versions.is_empty() {
     let versions_source = episode.versions.as_ref().or(playback.versions.as_ref());
     if let Some(versions) = versions_source {
         if versions.len() >= 2 {

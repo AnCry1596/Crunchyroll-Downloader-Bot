@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 # HTTP client (existing)
-wreq = { version = "6.0.0-rc.27", features = ["socks", "json", "multipart", "hickory-dns", "charset", "cookies", "gzip", "brotli", "zstd", "deflate", "tracing", "query", "form"] }
-wreq-util = { version = "3.0.0-rc.9", features = ["emulation", "emulation-compression", "emulation-serde", "emulation-rand"] }
+wreq = { version = "6.0.0-rc.28", features = ["socks", "json", "multipart", "hickory-dns", "charset", "cookies", "gzip", "brotli", "zstd", "deflate", "tracing", "query", "form"] }
+wreq-util = { version = "3.0.0-rc.10", features = ["emulation", "emulation-compression", "emulation-serde"] }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
@@ -67,6 +67,6 @@ tokio-util = { version = "0.7.18", features = ["io"] }
 futures-util = "0.3"
 
 [patch.crates-io]
-wreq = { git = "https://github.com/0x676e67/wreq"}
-wreq-util = { git = "https://github.com/0x676e67/wreq-util"}
+wreq = { git = "https://github.com/0x676e67/wreq" }
+wreq-util = { git = "https://github.com/0x676e67/wreq-util" }
 teloxide = { git = "https://github.com/AnCry1596/teloxide" }

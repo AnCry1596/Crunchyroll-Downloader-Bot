@@ -48,6 +48,14 @@ impl SegmentDownloader {
         }
     }
 
+    pub fn new_with_cancelled(http: wreq::Client, config: SegmentDownloaderConfig, cancelled: Arc<AtomicBool>) -> Self {
+        Self {
+            http,
+            config,
+            cancelled,
+        }
+    }
+
     /// Cancel ongoing downloads
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::SeqCst);
@@ -144,6 +152,7 @@ impl SegmentDownloader {
                     segment.byte_range,
                     config.retry_count,
                     config.retry_delay_ms,
+                    Some(&cancelled),
                 )
                 .await?;
 
@@ -206,6 +215,7 @@ impl SegmentDownloader {
             byte_range,
             self.config.retry_count,
             self.config.retry_delay_ms,
+            Some(&self.cancelled),
         )
         .await
     }
@@ -219,10 +229,17 @@ async fn download_segment_internal(
     byte_range: Option<(u64, u64)>,
     retry_count: usize,
     retry_delay_ms: u64,
+    cancelled: Option<&Arc<AtomicBool>>,
 ) -> Result<SegmentDownloadResult> {
     let mut last_error = None;
 
     for attempt in 0..=retry_count {
+        if let Some(c) = cancelled {
+            if c.load(Ordering::SeqCst) {
+                return Err(Error::Cancelled);
+            }
+        }
+
         if attempt > 0 {
             tokio::time::sleep(tokio::time::Duration::from_millis(retry_delay_ms)).await;
             tracing::debug!("Retry {} for segment: {}", attempt, url);

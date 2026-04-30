@@ -250,10 +250,10 @@ pub fn audio_selection_keyboard(
     let confirm_callback = format!("ad:{}:{}", episode_id, user_id);
     buttons.push(vec![InlineKeyboardButton::callback(confirm_label, confirm_callback)]);
 
-    // Back button
+    // Back button - go back to episode info
     buttons.push(vec![InlineKeyboardButton::callback(
         "⬅️ Quay lại",
-        format!("back:search:{}", user_id),
+        format!("episode:{}:{}", episode_id, user_id),
     )]);
 
     InlineKeyboardMarkup::new(buttons)
