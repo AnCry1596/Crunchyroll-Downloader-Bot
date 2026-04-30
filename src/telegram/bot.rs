@@ -260,6 +260,43 @@ impl BotState {
     }
 }
 
+const GITHUB_REPO: &str = "AnCry1596/Crunchyroll-Downloader-Bot";
+const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Check GitHub releases for a newer version. Returns (latest_tag, release_url) if update available.
+async fn check_for_update() -> Option<(String, String)> {
+    let url = format!(
+        "https://api.github.com/repos/{}/releases/latest",
+        GITHUB_REPO
+    );
+    let client = wreq::Client::builder()
+        .build()
+        .ok()?;
+    let resp = client
+        .get(&url)
+        .header("User-Agent", format!("crunchyroll-downloader-bot/{}", CURRENT_VERSION))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let json: serde_json::Value = resp.json().await.ok()?;
+    let tag = json.get("tag_name")?.as_str()?;
+    let html_url = json.get("html_url")?.as_str().unwrap_or("");
+
+    // Strip leading 'v' for comparison
+    let latest = tag.trim_start_matches('v');
+    let current = CURRENT_VERSION.trim_start_matches('v');
+
+    if latest != current {
+        Some((tag.to_string(), html_url.to_string()))
+    } else {
+        None
+    }
+}
+
 /// Detect the max file size allowed for direct Telegram upload based on the api_url:
 /// - None (official API): 50 MB
 /// - api_url behind Cloudflare (cf-ray or server: cloudflare headers): 100 MB
@@ -395,6 +432,46 @@ pub async fn run_bot(config: Config) -> Result<()> {
         database,
         telegram_max_upload_bytes,
     ));
+
+    // Spawn background update checker:
+    // - Checks GitHub once per day
+    // - If outdated, notifies owners every 2 minutes until updated
+    {
+        let bot_clone = bot.clone();
+        let owner_ids: Vec<i64> = state.config.telegram.owner_users.iter().map(|o| o.id).collect();
+        tokio::spawn(async move {
+            const CHECK_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(86400); // 1 day
+            const SPAM_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(120);   // 2 min
+
+            loop {
+                tracing::info!("Checking for updates (current: v{})...", CURRENT_VERSION);
+                match check_for_update().await {
+                    Some((tag, url)) => {
+                        tracing::warn!("New version available: {} — {}", tag, url);
+                        let msg = format!(
+                            "🆕 *Có phiên bản mới\\!*\n\nPhiên bản hiện tại: `v{}`\nPhiên bản mới: `{}`\n\n[Tải xuống tại đây]({})",
+                            CURRENT_VERSION, tag, url
+                        );
+                        // Spam every 2 minutes until next daily check
+                        let spam_count = CHECK_INTERVAL.as_secs() / SPAM_INTERVAL.as_secs();
+                        for _ in 0..spam_count {
+                            for &owner_id in &owner_ids {
+                                let _ = bot_clone
+                                    .send_message(ChatId(owner_id), &msg)
+                                    .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                                    .await;
+                            }
+                            tokio::time::sleep(SPAM_INTERVAL).await;
+                        }
+                    }
+                    None => {
+                        tracing::info!("Bot is up to date (v{})", CURRENT_VERSION);
+                        tokio::time::sleep(CHECK_INTERVAL).await;
+                    }
+                }
+            }
+        });
+    }
 
     // Set bot commands menu
     tracing::info!("Setting bot commands menu...");
