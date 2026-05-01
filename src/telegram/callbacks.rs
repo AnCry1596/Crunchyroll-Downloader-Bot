@@ -6,10 +6,9 @@ use crate::telegram::bot::{BotState, DownloadSubscriber};
 use crate::telegram::buzzheavier::upload_to_buzzheavier;
 use crate::telegram::commands::build_callback_not_authorized;
 use crate::telegram::gofile::upload_to_gofile;
-use crate::crunchyroll::types::{AudioVersionInfo, Version};
-use crate::telegram::bot::AudioSelectionState;
+use crate::crunchyroll::types::AudioVersionInfo;
 use crate::telegram::keyboards::{
-    audio_selection_keyboard, download_complete_keyboard, download_progress_keyboard,
+    download_complete_keyboard, download_progress_keyboard,
     episode_actions_keyboard_with_pixeldrain, episodes_keyboard, seasons_keyboard,
 };
 use crate::telegram::pixeldrain::upload_to_pixeldrain;
@@ -106,9 +105,11 @@ pub async fn handle_callback(
         None => return Ok(()),
     };
 
+    let s = state.strings;
+
     // Check if user is allowed to use the bot in this chat
     if !state.is_allowed(callback_user_id, chat_id.0).await {
-        let not_authorized_msg = build_callback_not_authorized(&state.config.telegram.owner_users);
+        let not_authorized_msg = build_callback_not_authorized(&state.config.telegram.owner_users, s);
         bot.answer_callback_query(q.id.clone())
             .text(not_authorized_msg)
             .show_alert(true)
@@ -120,9 +121,8 @@ pub async fn handle_callback(
     // Skip validation for "noop" buttons
     if data != "noop" {
         if validate_callback_user(&parts, callback_user_id).is_none() {
-            // Not the owner - show alert and return
             bot.answer_callback_query(q.id.clone())
-                .text("Bạn không phải người yêu cầu!")
+                .text(s.not_callback_owner)
                 .show_alert(true)
                 .await?;
             return Ok(());
@@ -161,13 +161,6 @@ pub async fn handle_callback(
         ["send_cache", episode_id, _user] => {
             handle_send_cache(&bot, chat_id, msg_id, episode_id, user_id, state.clone()).await?;
         }
-        ["as", episode_id, idx, _user] => {
-            let idx: usize = idx.parse().unwrap_or(0);
-            handle_audio_select(&bot, chat_id, msg_id, episode_id, idx, user_id, &state).await?;
-        }
-        ["ad", episode_id, _user] => {
-            handle_audio_download_confirm(&bot, chat_id, msg_id, reply_to_msg_id, episode_id, user_id, state.clone()).await?;
-        }
         ["page", season_id, series_id, page, _user] => {
             let page: usize = page.parse().unwrap_or(0);
             handle_page_change(&bot, chat_id, msg_id, season_id, series_id, page, user_id, &state).await?;
@@ -198,10 +191,9 @@ async fn handle_series_selected(
     user_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
-    bot.edit_message_text(chat_id, msg_id, "⏳ Đang tải danh sách các mùa...")
-        .await?;
+    let s = state.strings;
+    bot.edit_message_text(chat_id, msg_id, s.loading_seasons).await?;
 
-    // Get series info for the title
     let series_title = match state.cr_client.get_series(series_id).await {
         Ok(series) => series.title,
         Err(_) => "Unknown".to_string(),
@@ -210,26 +202,23 @@ async fn handle_series_selected(
     match state.cr_client.get_seasons(series_id).await {
         Ok(seasons) => {
             if seasons.is_empty() {
-                bot.edit_message_text(chat_id, msg_id, "⚠️ Không tìm thấy mùa nào cho series này.")
-                    .await?;
+                bot.edit_message_text(chat_id, msg_id, s.no_seasons).await?;
                 return Ok(());
             }
 
-            // Cache series title for later use
             state.cache_series_title(series_id.to_string(), series_title.clone()).await;
 
-            let keyboard = seasons_keyboard(&seasons, series_id, user_id);
+            let keyboard = seasons_keyboard(&seasons, series_id, user_id, s);
             bot.edit_message_text(
                 chat_id,
                 msg_id,
-                format!("📺 {}\n\n📂 Vui lòng chọn một mùa phim:", series_title),
+                format!("📺 {}\n\n{}", series_title, s.seasons_select),
             )
             .reply_markup(keyboard)
             .await?;
         }
         Err(e) => {
-            bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải các mùa: {}", e))
-                .await?;
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.seasons_error, e)).await?;
         }
     }
 
@@ -245,36 +234,32 @@ async fn handle_season_selected(
     user_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
-    bot.edit_message_text(chat_id, msg_id, "⏳ Đang tải danh sách tập phim...")
-        .await?;
+    let s = state.strings;
+    bot.edit_message_text(chat_id, msg_id, s.loading_episodes).await?;
 
-    // Get series title from cache
     let series_title = state.get_cached_series_title(series_id).await
         .unwrap_or_else(|| "Unknown".to_string());
 
     match state.cr_client.get_episodes(season_id).await {
         Ok(episodes) => {
             if episodes.is_empty() {
-                bot.edit_message_text(chat_id, msg_id, "⚠️ Không tìm thấy tập nào cho mùa này.")
-                    .await?;
+                bot.edit_message_text(chat_id, msg_id, s.no_episodes_season).await?;
                 return Ok(());
             }
 
-            // Get season title from first episode
             let season_title = episodes.first()
                 .and_then(|ep| ep.season_title.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
 
-            // Cache season title for later use
             state.cache_season_title(season_id.to_string(), season_title.clone()).await;
 
-            let keyboard = episodes_keyboard(&episodes, season_id, series_id, 0, 8, user_id);
+            let keyboard = episodes_keyboard(&episodes, season_id, series_id, 0, 8, user_id, s);
             bot.edit_message_text(
                 chat_id,
                 msg_id,
                 format!(
-                    "📺 {}\n📁 {}\n\n🎬 Chọn một tập ({} có sẵn):",
-                    series_title, season_title, episodes.len()
+                    "📺 {}\n📁 {}\n\n{} ({}):",
+                    series_title, season_title, s.episodes_select, episodes.len()
                 ),
             )
             .reply_markup(keyboard)
@@ -283,8 +268,7 @@ async fn handle_season_selected(
             state.cache_episodes(season_id.to_string(), episodes).await;
         }
         Err(e) => {
-            bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải danh sách tập phim: {}", e))
-                .await?;
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.episodes_error, e)).await?;
         }
     }
 
@@ -302,7 +286,8 @@ async fn handle_page_change(
     state: &BotState,
 ) -> ResponseResult<()> {
     if let Some(episodes) = state.get_cached_episodes(season_id).await {
-        let keyboard = episodes_keyboard(&episodes, season_id, series_id, page, 8, user_id);
+        let s = state.strings;
+        let keyboard = episodes_keyboard(&episodes, season_id, series_id, page, 8, user_id, s);
         bot.edit_message_reply_markup(chat_id, msg_id)
             .reply_markup(keyboard)
             .await?;
@@ -318,8 +303,8 @@ async fn handle_episode_selected(
     user_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
-    bot.edit_message_text(chat_id, msg_id, "⏳ Đang tải thông tin tập phim...")
-        .await?;
+    let s = state.strings;
+    bot.edit_message_text(chat_id, msg_id, s.loading_episode_info).await?;
 
     let cached_file_opt = if let Some(ref db) = state.database {
         db.get_cached_file(episode_id).await.unwrap_or(None)
@@ -331,35 +316,35 @@ async fn handle_episode_selected(
 
     match state.cr_client.get_episode(episode_id).await {
         Ok(episode) => {
-            let series_title = episode.series_title.as_deref().unwrap_or("Không rõ");
-            let season_title = episode.season_title.as_deref().unwrap_or("Không rõ");
+            let series_title = episode.series_title.as_deref().unwrap_or(s.unknown_field);
+            let season_title = episode.season_title.as_deref().unwrap_or(s.unknown_field);
 
             let mut info = format!(
                 "📺 {} | 📁 {}\n\n\
                 🎬 {}\n\n\
-                🔢 Tập: {}\n\
-                ⏱ Thời lượng: {}\n\
-                🔊 Âm thanh: {}\n\n\
+                {}: {}\n\
+                {}: {}\n\
+                {}: {}\n\n\
                 📝 {}",
                 series_title,
                 season_title,
                 episode.title,
-                episode.display_number(),
-                episode.duration_formatted(),
-                episode.audio_locale.as_deref().unwrap_or("Không rõ"),
-                episode.description.as_deref().unwrap_or("Không có mô tả"),
+                s.field_episode, episode.display_number(),
+                s.field_duration, episode.duration_formatted(),
+                s.field_audio, episode.audio_locale.as_deref().unwrap_or(s.unknown_field),
+                episode.description.as_deref().unwrap_or(s.no_description),
             );
 
             let keyboard = if cached_file_opt.is_some() {
-                info.push_str("\n\n✅ <b>File có sẵn trong Cache!</b>");
+                info.push_str(&format!("\n\n{}", s.cache_available));
                 let mut buttons = Vec::new();
-                buttons.push(vec![InlineKeyboardButton::callback("🚀 Gửi ngay từ Cache", format!("send_cache:{}:{}", episode_id, user_id))]);
+                buttons.push(vec![InlineKeyboardButton::callback(s.kb_send_from_cache, format!("send_cache:{}:{}", episode_id, user_id))]);
 
                 let mut back_row = Vec::new();
                 if let Some(season_id) = &episode.season_id {
-                    back_row.push(InlineKeyboardButton::callback("⬅️ Quay lại", format!("back:season:{}:{}", season_id, user_id)));
+                    back_row.push(InlineKeyboardButton::callback(s.kb_back, format!("back:season:{}:{}", season_id, user_id)));
                 } else {
-                    back_row.push(InlineKeyboardButton::callback("⬅️ Quay lại", format!("back:search:{}", user_id)));
+                    back_row.push(InlineKeyboardButton::callback(s.kb_back, format!("back:search:{}", user_id)));
                 }
                 buttons.push(back_row);
                 InlineKeyboardMarkup::new(buttons)
@@ -369,6 +354,7 @@ async fn handle_episode_selected(
                     episode.season_id.as_deref().unwrap_or(""),
                     pixeldrain_enabled,
                     user_id,
+                    s,
                 )
             };
 
@@ -378,8 +364,7 @@ async fn handle_episode_selected(
                 .await?;
         }
         Err(e) => {
-            bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải thông tin tập phim: {}", e))
-                .await?;
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.episode_info_error, e)).await?;
         }
     }
 
@@ -399,16 +384,17 @@ async fn handle_send_cache(
             Ok(Some(cached)) => {
                 tracing::info!("Processing send_cache for episode {}", episode_id);
 
+                let s = state.strings;
                 // Check subtitle freshness before serving cache
                 if !check_subtitle_freshness(&state, episode_id, cached.subtitle_locales.as_ref()).await {
                     tracing::info!("Subtitles changed for {}, invalidating cache and re-downloading", episode_id);
                     invalidate_all_caches(&state, episode_id).await;
-                    bot.edit_message_text(chat_id, msg_id, "🔄 Phụ đề đã thay đổi. Đang tải lại...").await?;
+                    bot.edit_message_text(chat_id, msg_id, s.cache_invalidated).await?;
                     handle_download_start(bot, chat_id, msg_id, None, episode_id, user_id, state, false).await?;
                     return Ok(());
                 }
 
-                bot.edit_message_text(chat_id, msg_id, "✅ Tìm thấy trong cache! 📤 Đang gửi...").await?;
+                bot.edit_message_text(chat_id, msg_id, s.cache_hit_sending).await?;
 
                 match forward_cached_file(
                     bot,
@@ -447,11 +433,12 @@ async fn handle_send_cache(
                 }
             }
             Ok(None) => {
-                bot.edit_message_text(chat_id, msg_id, "⚠️ Không tìm thấy trong cache. ⬇️ Bắt đầu tải xuống...").await?;
+                let s = state.strings;
+                bot.edit_message_text(chat_id, msg_id, s.cache_miss_downloading).await?;
                 handle_download_start(bot, chat_id, msg_id, None, episode_id, user_id, state, false).await?;
             }
             Err(e) => {
-                bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi cơ sở dữ liệu: {}", e)).await?;
+                bot.edit_message_text(chat_id, msg_id, format!("❌ DB: {}", e)).await?;
             }
         }
     }
@@ -507,113 +494,6 @@ async fn notify_subscribers_and_cleanup(
 }
 
 /// Handle audio language selection toggle
-async fn handle_audio_select(
-    bot: &Bot,
-    chat_id: ChatId,
-    msg_id: MessageId,
-    episode_id: &str,
-    idx: usize,
-    user_id: i64,
-    state: &BotState,
-) -> ResponseResult<()> {
-    let key = format!("{}:{}", user_id, episode_id);
-    if let Some(updated) = state.toggle_audio_selection(&key, idx).await {
-        let keyboard = audio_selection_keyboard(
-            &updated.versions,
-            &updated.selected_indices,
-            episode_id,
-            user_id,
-        );
-        bot.edit_message_reply_markup(chat_id, msg_id)
-            .reply_markup(keyboard)
-            .await?;
-    }
-    Ok(())
-}
-
-/// Handle audio selection confirm -> start download with selected audio tracks
-async fn handle_audio_download_confirm(
-    bot: &Bot,
-    chat_id: ChatId,
-    msg_id: MessageId,
-    reply_to_msg_id: Option<MessageId>,
-    episode_id: &str,
-    user_id: i64,
-    state: Arc<BotState>,
-) -> ResponseResult<()> {
-    let key = format!("{}:{}", user_id, episode_id);
-    let selection = match state.get_audio_selection(&key).await {
-        Some(s) => s,
-        None => {
-            bot.edit_message_text(chat_id, msg_id, "⚠️ Phiên chọn ngôn ngữ đã hết hạn. Vui lòng thử lại.").await?;
-            return Ok(());
-        }
-    };
-
-    // Clean up selection state
-    state.remove_audio_selection(&key).await;
-
-    let playback = &selection.playback;
-
-    if playback.url.is_none() {
-        bot.edit_message_text(chat_id, msg_id, "⚠️ Không có URL luồng khả dụng.").await?;
-        return Ok(());
-    }
-
-    bot.edit_message_text(chat_id, msg_id, "⬇️ Đang chuẩn bị tải xuống...").await?;
-
-    // Determine which version is primary (first selected) and which are additional
-    let selected_versions: Vec<&Version> = selection.selected_indices.iter()
-        .filter_map(|&i| selection.versions.get(i))
-        .collect();
-
-    if selected_versions.is_empty() {
-        bot.edit_message_text(chat_id, msg_id, "⚠️ Chưa chọn ngôn ngữ nào.").await?;
-        return Ok(());
-    }
-
-    // The primary stream uses the already-fetched playback URL
-    // Additional versions need their own playback fetch
-    let mut additional_audio_versions: Vec<AudioVersionInfo> = Vec::new();
-
-    // Skip the first selected (it uses the primary stream), fetch playback for the rest
-    for version in selected_versions.iter().skip(1) {
-        let guid = match &version.guid {
-            Some(g) => g.clone(),
-            None => continue,
-        };
-        let locale = version.audio_locale.as_deref().unwrap_or("unknown").to_string();
-
-        match state.cr_client.get_playback(&guid).await {
-            Ok(version_playback) => {
-                if let Some(version_url) = version_playback.url {
-                    additional_audio_versions.push(AudioVersionInfo {
-                        audio_locale: locale,
-                        guid: guid.clone(),
-                        stream_url: version_url,
-                        drm_pssh: version_playback.drm.as_ref().and_then(|d| d.pssh.clone()),
-                        video_token: version_playback.token.clone(),
-                        content_id: Some(episode_id.to_string()),
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch playback for audio version {}: {}", locale, e);
-            }
-        }
-    }
-
-    let primary_audio_locale = selected_versions.first()
-        .and_then(|v| v.audio_locale.clone())
-        .or_else(|| playback.audio_locale.clone());
-
-    // Call handle_download_start with the pre-built additional audio versions
-    handle_download_start_with_audio(
-        bot, chat_id, msg_id, reply_to_msg_id, episode_id, user_id, state,
-        false, additional_audio_versions, primary_audio_locale, true,
-    ).await
-}
-
 async fn handle_download_start(
     bot: &Bot,
     chat_id: ChatId,
@@ -626,7 +506,7 @@ async fn handle_download_start(
 ) -> ResponseResult<()> {
     handle_download_start_with_audio(
         bot, chat_id, msg_id, reply_to_msg_id, episode_id, user_id, state,
-        use_pixeldrain, Vec::new(), None, false,
+        use_pixeldrain, Vec::new(), None, Vec::new(),
     ).await
 }
 
@@ -641,7 +521,7 @@ async fn handle_download_start_with_audio(
     use_pixeldrain: bool,
     extra_audio_versions: Vec<AudioVersionInfo>,
     extra_primary_locale: Option<String>,
-    audio_already_selected: bool,
+    extra_subtitles: Vec<SubtitleTrack>,
 ) -> ResponseResult<()> {
     tracing::info!("handle_download_start: episode_id={}, use_pixeldrain={}, has_database={}, extra_audio={}",
         episode_id, use_pixeldrain, state.database.is_some(), extra_audio_versions.len());
@@ -670,8 +550,7 @@ async fn handle_download_start_with_audio(
 
             if let Some((service, filename, file_size, audio_locale, subtitle_locales, download_url)) = service_cache {
                 // Check subtitle freshness once
-                if check_subtitle_freshness(&state, episode_id, subtitle_locales.as_ref()).await {
-                    // Fresh - serve from cache
+        if check_subtitle_freshness(&state, episode_id, subtitle_locales.as_ref()).await {
                     match service {
                         "buzzheavier" => { let _ = db.increment_buzzheavier_serve_count(episode_id).await; }
                         "pixeldrain" => { let _ = db.increment_pixeldrain_serve_count(episode_id).await; }
@@ -716,7 +595,8 @@ async fn handle_download_start_with_audio(
                         invalidate_all_caches(&state, episode_id).await;
                         // Fall through to download below
                     } else {
-                        bot.edit_message_text(chat_id, msg_id, "✅ Tìm thấy trong cache! 📤 Đang gửi...").await?;
+                        let s_ref = state.strings;
+                        bot.edit_message_text(chat_id, msg_id, s_ref.cache_hit_sending).await?;
 
                         match forward_cached_file(
                             bot,
@@ -773,12 +653,13 @@ async fn handle_download_start_with_audio(
         }
     }
 
-    bot.edit_message_text(chat_id, msg_id, "⬇️ Bắt đầu tải xuống...").await?;
+    let s = state.strings;
+    bot.edit_message_text(chat_id, msg_id, s.download_starting).await?;
 
     let mut episode = match state.cr_client.get_episode(episode_id).await {
         Ok(e) => e,
         Err(e) => {
-            bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi: {}", e)).await?;
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.download_error, e)).await?;
             return Ok(());
         }
     };
@@ -814,7 +695,7 @@ async fn handle_download_start_with_audio(
     let playback = match state.cr_client.get_playback(episode_id).await {
         Ok(p) => p,
         Err(e) => {
-            bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi lấy thông tin luồng: {}", e)).await?;
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.stream_fetch_error, e)).await?;
             return Ok(());
         }
     };
@@ -822,56 +703,104 @@ async fn handle_download_start_with_audio(
     let stream_url = match playback.url.clone() {
         Some(url) => url,
         None => {
-            bot.edit_message_text(chat_id, msg_id, "⚠️ Không có URL luồng khả dụng.").await?;
+            bot.edit_message_text(chat_id, msg_id, s.stream_url_unavailable).await?;
             return Ok(());
         }
     };
 
-    // Check if multiple audio versions are available - show selection UI
-    // Skip if user already went through audio selection
-    if !audio_already_selected && extra_audio_versions.is_empty() {
-    let versions_source = episode.versions.as_ref().or(playback.versions.as_ref());
-    if let Some(versions) = versions_source {
-        if versions.len() >= 2 {
-            // Pre-select the original version or the first one
-            let default_idx = versions.iter().position(|v| v.original == Some(true)).unwrap_or(0);
+    // Auto-select audio versions based on preferred_audio config
+    let (final_stream_url, final_primary_locale, final_extra_audio, final_extra_subtitles) =
+        if extra_audio_versions.is_empty() {
+            let versions_source = episode.versions.as_ref().or(playback.versions.as_ref());
+            let mut resolved_url = stream_url.clone();
+            let mut resolved_locale = extra_primary_locale.clone().or_else(|| playback.audio_locale.clone());
+            let mut resolved_extra: Vec<AudioVersionInfo> = Vec::new();
+            let mut resolved_subs: Vec<SubtitleTrack> = extra_subtitles.clone();
 
-            let selection_key = format!("{}:{}", user_id, episode_id);
-            let selection_state = AudioSelectionState {
-                versions: versions.clone(),
-                selected_indices: vec![default_idx],
-                episode_id: episode_id.to_string(),
-                playback: playback.clone(),
-                episode: episode.clone(),
-            };
-            state.set_audio_selection(selection_key, selection_state).await;
+            if let Some(raw_versions) = versions_source {
+                if raw_versions.len() >= 2 {
+                    let preferred = &state.config.crunchyroll.preferred_audio;
 
-            let keyboard = audio_selection_keyboard(versions, &[default_idx], episode_id, user_id);
-            bot.edit_message_text(
-                chat_id,
-                msg_id,
-                format!("🔊 Chọn ngôn ngữ âm thanh ({} khả dụng):", versions.len()),
-            )
-            .reply_markup(keyboard)
-            .await?;
-            return Ok(());
-        }
-    }
-    }
+                    // Pick primary: first preferred locale present, else original, else first
+                    let primary = preferred.iter()
+                        .find_map(|p| raw_versions.iter().find(|v| v.audio_locale.as_deref() == Some(p.as_str())))
+                        .or_else(|| raw_versions.iter().find(|v| v.original == Some(true)))
+                        .or_else(|| raw_versions.first());
+
+                    if let Some(prim) = primary {
+                        let prim_locale = prim.audio_locale.clone();
+                        let prim_guid = prim.guid.clone();
+
+                        // Swap stream if primary differs from what playback returned
+                        if prim_locale.as_deref() != playback.audio_locale.as_deref() {
+                            if let Some(guid) = prim_guid {
+                                if let Ok(prim_pb) = state.cr_client.get_playback(&guid).await {
+                                    if let Some(url) = prim_pb.url {
+                                        resolved_url = url;
+                                        resolved_locale = prim_locale.clone();
+                                        // Merge subtitles from primary playback
+                                        for sub in prim_pb.subtitles.values().chain(prim_pb.captions.values()) {
+                                            if !resolved_subs.iter().any(|s| s.locale == sub.locale) {
+                                                resolved_subs.push(sub.clone());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Collect additional preferred locales (skip primary)
+                        for pref in preferred.iter() {
+                            if pref.as_str() == prim_locale.as_deref().unwrap_or("") { continue; }
+                            if let Some(ver) = raw_versions.iter().find(|v| v.audio_locale.as_deref() == Some(pref.as_str())) {
+                                if let Some(ref g) = ver.guid {
+                                    if let Ok(vp) = state.cr_client.get_playback(g).await {
+                                        if let Some(url) = vp.url {
+                                            for sub in vp.subtitles.values().chain(vp.captions.values()) {
+                                                if !resolved_subs.iter().any(|s| s.locale == sub.locale) {
+                                                    resolved_subs.push(sub.clone());
+                                                }
+                                            }
+                                            resolved_extra.push(AudioVersionInfo {
+                                                audio_locale: pref.clone(),
+                                                guid: g.clone(),
+                                                stream_url: url,
+                                                drm_pssh: vp.drm.as_ref().and_then(|d| d.pssh.clone()),
+                                                video_token: vp.token.clone(),
+                                                content_id: Some(episode_id.to_string()),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            (resolved_url, resolved_locale, resolved_extra, resolved_subs)
+        } else {
+            (stream_url, extra_primary_locale.or_else(|| playback.audio_locale.clone()), extra_audio_versions, extra_subtitles)
+        };
 
     let mut all_subtitles: Vec<_> = playback.subtitles.values().cloned().collect();
     all_subtitles.extend(playback.captions.values().cloned());
+    for sub in final_extra_subtitles {
+        if !all_subtitles.iter().any(|s| s.locale == sub.locale) {
+            all_subtitles.push(sub);
+        }
+    }
 
     let task = DownloadTask {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: uuid::Uuid::new_v4().to_string().replace('-', "")[..16].to_string(),
         episode: episode.clone(),
-        stream_url,
+        stream_url: final_stream_url,
         drm_pssh: playback.drm.as_ref().and_then(|d| d.pssh.clone()),
         subtitles: all_subtitles,
         video_token: playback.token.clone(),
         content_id: Some(episode_id.to_string()),
-        additional_audio_versions: extra_audio_versions,
-        primary_audio_locale: extra_primary_locale.or_else(|| playback.audio_locale.clone()),
+        additional_audio_versions: final_extra_audio,
+        primary_audio_locale: final_primary_locale,
     };
 
     let task_id = task.id.clone();
@@ -892,7 +821,7 @@ async fn handle_download_start_with_audio(
             Ok(false) => {
                 let subscriber = DownloadSubscriber { chat_id, message_id: msg_id, user_id };
                 state.add_download_subscriber(episode_id.to_string(), subscriber).await;
-                bot.edit_message_text(chat_id, msg_id, "⏳ Tập tin này đang được tải xuống. 📤 Bạn sẽ nhận được nó khi sẵn sàng.").await?;
+                bot.edit_message_text(chat_id, msg_id, s.already_downloading).await?;
                 return Ok(());
             }
             Err(e) => tracing::warn!("Failed to create active download record: {}", e),
@@ -900,8 +829,8 @@ async fn handle_download_start_with_audio(
         }
     }
 
-    let keyboard = download_progress_keyboard(&task_id, episode_id, user_id);
-    bot.edit_message_text(chat_id, msg_id, "⬇️ Đang tải xuống... 0%").reply_markup(keyboard).await?;
+    let keyboard = download_progress_keyboard(&task_id, episode_id, user_id, s);
+    bot.edit_message_text(chat_id, msg_id, s.download_progress).reply_markup(keyboard).await?;
 
     let bot_clone = bot.clone();
     let download_manager = state.download_manager.clone();
@@ -918,6 +847,7 @@ async fn handle_download_start_with_audio(
     let episode_id_clone = episode_id.to_string();
     let episode_id_for_keyboard = episode_id.to_string();
     let bot_state = state.clone();
+    let strings = s; // &'static Strings — Copy, safe to capture
     let user_id_clone = user_id;
     let reply_to_msg_id_clone = reply_to_msg_id;
     let temp_dir_for_cleanup = state.config.download.temp_dir.join(&task_id);
@@ -955,7 +885,7 @@ async fn handle_download_start_with_audio(
                         let _ = bot.edit_message_text(chat_id, msg_id, &status)
                             .reply_markup(InlineKeyboardMarkup::new(Vec::<Vec<InlineKeyboardButton>>::new())).await;
                     } else {
-                        let keyboard = download_progress_keyboard(&task_id, &episode_id_kb, user_id_clone);
+                        let keyboard = download_progress_keyboard(&task_id, &episode_id_kb, user_id_clone, strings);
                         let _ = bot.edit_message_text(chat_id, msg_id, &status).reply_markup(keyboard).await;
                     }
 
@@ -1048,14 +978,12 @@ async fn handle_download_start_with_audio(
                         let _ = tokio::fs::remove_file(&result.path).await;
                         if result.temp_dir.exists() { let _ = tokio::fs::remove_dir_all(&result.temp_dir).await; }
                         let _ = bot_clone.edit_message_text(chat_id, msg_id, format!(
-                            "❌ Không thể tải lên!\n\n\
-                            📦 Kích thước: {} (vượt quá giới hạn Telegram 2GB)\n\n\
-                            ⚙️ Không có dịch vụ upload nào được cấu hình.\n\
-                            Vui lòng cấu hình Buzzheavier, Pixeldrain hoặc Gofile trong config.toml",
-                            format_size(result.size)
+                            "❌ Upload failed!\n\n📦 Size: {}\n\n{}",
+                            format_size(result.size),
+                            strings.file_too_large_no_service
                         )).await;
                         notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone,
-                            DownloadResultMsg::Failed { error: "File quá lớn và không có dịch vụ upload".to_string() }).await;
+                            DownloadResultMsg::Failed { error: strings.file_too_large_no_service.to_string() }).await;
                         return;
                     }
 
@@ -1096,8 +1024,10 @@ async fn handle_download_start_with_audio(
 
                         if attempt > 0 {
                             let _ = bot_clone.edit_message_text(chat_id, msg_id, format!(
-                                "⚠️ Tải lên thất bại!\n{}\n\n🔄 Đang chuyển sang {}...",
+                                "{}!\n{}\n\n{} {}...",
+                                strings.upload_error,
                                 errors.iter().map(|e| format!("• {}", e)).collect::<Vec<_>>().join("\n"),
+                                strings.upload_switching,
                                 service_name
                             )).await;
                         }
@@ -1210,7 +1140,7 @@ async fn handle_download_start_with_audio(
                                 if result.temp_dir.exists() { let _ = tokio::fs::remove_dir_all(&result.temp_dir).await; }
 
                                 let fallback_note = if attempt > 0 {
-                                    format!("✅ Tải lên hoàn tất! (Fallback)\n\n")
+                                    strings.upload_fallback_prefix.to_string()
                                 } else {
                                     String::new()
                                 };
@@ -1271,7 +1201,8 @@ async fn handle_download_start_with_audio(
                         let _ = tokio::fs::remove_file(&result.path).await;
                         if result.temp_dir.exists() { let _ = tokio::fs::remove_dir_all(&result.temp_dir).await; }
                         let _ = bot_clone.edit_message_text(chat_id, msg_id, format!(
-                            "❌ Tải lên thất bại!\n\n{}",
+                            "{}!\n\n{}",
+                            strings.upload_error,
                             errors.iter().map(|e| format!("• {}", e)).collect::<Vec<_>>().join("\n")
                         )).await;
                         notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone,
@@ -1319,7 +1250,7 @@ async fn handle_download_start_with_audio(
                                     result.audio_locale.as_deref(),
                                     Some(&result.subtitle_locales),
                                 ).await {
-                                    let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi chuyển tiếp tập tin: {}", e)).await;
+                                    let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("{}: {}", strings.forward_error, e)).await;
                                     notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone, DownloadResultMsg::Failed { error: e.to_string() }).await;
                                     update_task.abort();
                                     return;
@@ -1344,7 +1275,7 @@ async fn handle_download_start_with_audio(
                                 update_task.abort();
                                 let _ = tokio::fs::remove_file(&result.path).await;
                                 if result.temp_dir.exists() { let _ = tokio::fs::remove_dir_all(&result.temp_dir).await; }
-                                let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("❌ Tải lên lưu trữ thất bại: {}", e)).await;
+                                let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("{}: {}", strings.upload_storage_error, e)).await;
                                 notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone, DownloadResultMsg::Failed { error: e.to_string() }).await;
                             }
                         }
@@ -1362,7 +1293,7 @@ async fn handle_download_start_with_audio(
                                 notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone, DownloadResultMsg::Telegram { filename: result.filename.clone() }).await;
                             }
                             Err(e) => {
-                                let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("❌ Tải lên thất bại: {}", e)).await;
+                                let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("{}: {}", strings.upload_error, e)).await;
                                 notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone, DownloadResultMsg::Failed { error: e.to_string() }).await;
                             }
                         }
@@ -1375,7 +1306,7 @@ async fn handle_download_start_with_audio(
                 if temp_dir_for_cleanup.exists() {
                     let _ = tokio::fs::remove_dir_all(&temp_dir_for_cleanup).await;
                 }
-                let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("❌ Tải xuống thất bại: {}", e)).await;
+                let _ = bot_clone.edit_message_text(chat_id, msg_id, format!("{}: {}", strings.download_error, e)).await;
                 notify_subscribers_and_cleanup(&bot_clone, &bot_state, &episode_id_clone, DownloadResultMsg::Failed { error: e.to_string() }).await;
             }
         }
@@ -1401,17 +1332,17 @@ async fn handle_cancel_download(
         let _ = db.remove_active_download(episode_id).await;
     }
 
-    // Notify all subscribers that the download was cancelled
+    let s = state.strings;
     let subscribers = state.take_download_subscribers(episode_id).await;
     for subscriber in subscribers {
         let _ = bot.edit_message_text(
             subscriber.chat_id,
             subscriber.message_id,
-            "❌ Tải xuống đã bị huỷ bởi người yêu cầu ban đầu.\n\n💡 Vui lòng tự tải xuống.",
+            s.download_cancelled_subscriber,
         ).await;
     }
 
-    bot.edit_message_text(chat_id, msg_id, "❌ Tải xuống đã huỷ. Đã dọn dẹp các tệp tạm thời.").await?;
+    bot.edit_message_text(chat_id, msg_id, s.download_cancelled).await?;
     Ok(())
 }
 
@@ -1424,40 +1355,37 @@ async fn handle_back_navigation(
     user_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
+    let s = state.strings;
     match target {
-        // "search" => {
-        //     bot.edit_message_text(chat_id, msg_id, "🔍 Sử dụng /search <tên> hoặc /get <id>").await?;
-        // }
         "search" => {
-            bot.edit_message_text(chat_id, msg_id, "🔍 Sử dụng /search <tên>").await?;
+            bot.edit_message_text(chat_id, msg_id, s.back_search_hint).await?;
         }
         "season" => {
             if let Some(season_id) = extra {
                 if !season_id.is_empty() {
-                    bot.edit_message_text(chat_id, msg_id, "⏳ Đang tải các tập...").await?;
+                    bot.edit_message_text(chat_id, msg_id, s.loading_episodes).await?;
                     match state.cr_client.get_episodes(season_id).await {
                         Ok(episodes) => {
                             if episodes.is_empty() {
-                                bot.edit_message_text(chat_id, msg_id, "⚠️ Không tìm thấy tập nào cho mùa này.").await?;
+                                bot.edit_message_text(chat_id, msg_id, s.no_episodes_season).await?;
                                 return Ok(());
                             }
 
-                            // Get series and season title from first episode
                             let series_title = episodes.first()
                                 .and_then(|ep| ep.series_title.clone())
-                                .unwrap_or_else(|| "Không rõ".to_string());
+                                .unwrap_or_else(|| s.unknown_field.to_string());
                             let season_title = episodes.first()
                                 .and_then(|ep| ep.season_title.clone())
-                                .unwrap_or_else(|| "Không rõ".to_string());
+                                .unwrap_or_else(|| s.unknown_field.to_string());
 
                             let series_id = episodes.first().and_then(|e| e.series_id.as_deref()).unwrap_or("");
-                            let keyboard = episodes_keyboard(&episodes, season_id, series_id, 0, 8, user_id);
+                            let keyboard = episodes_keyboard(&episodes, season_id, series_id, 0, 8, user_id, s);
                             bot.edit_message_text(
                                 chat_id,
                                 msg_id,
                                 format!(
-                                    "📺 {}\n📁 {}\n\n🎬 Chọn một tập ({} có sẵn):",
-                                    series_title, season_title, episodes.len()
+                                    "📺 {}\n📁 {}\n\n{} ({}):",
+                                    series_title, season_title, s.episodes_select, episodes.len()
                                 ),
                             )
                             .reply_markup(keyboard)
@@ -1465,13 +1393,13 @@ async fn handle_back_navigation(
                             state.cache_episodes(season_id.to_string(), episodes).await;
                         }
                         Err(e) => {
-                            bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải các tập: {}", e)).await?;
+                            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.episodes_error, e)).await?;
                         }
                     }
                     return Ok(());
                 }
             }
-            bot.edit_message_text(chat_id, msg_id, "🔍 Sử dụng /search để bắt đầu tìm kiếm mới.").await?;
+            bot.edit_message_text(chat_id, msg_id, s.back_search_hint_full).await?;
         }
         "series" => {
             if let Some(series_id) = extra {
@@ -1480,10 +1408,10 @@ async fn handle_back_navigation(
                     return Ok(());
                 }
             }
-            bot.edit_message_text(chat_id, msg_id, "🔍 Sử dụng /search để bắt đầu tìm kiếm mới.").await?;
+            bot.edit_message_text(chat_id, msg_id, s.back_search_hint_full).await?;
         }
         _ => {
-            bot.edit_message_text(chat_id, msg_id, "🔍 Sử dụng /search để bắt đầu tìm kiếm mới.").await?;
+            bot.edit_message_text(chat_id, msg_id, s.back_search_hint_full).await?;
         }
     }
     Ok(())

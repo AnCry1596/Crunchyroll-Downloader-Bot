@@ -4,6 +4,7 @@ pub mod database;
 pub mod download;
 pub mod drm;
 pub mod error;
+pub mod i18n;
 pub mod proxy;
 pub mod telegram;
 pub mod tools;

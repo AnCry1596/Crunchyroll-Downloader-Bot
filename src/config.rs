@@ -123,6 +123,13 @@ pub struct TelegramConfig {
     /// If not set, uses the default Telegram API
     #[serde(default)]
     pub api_url: Option<String>,
+    /// UI language: "vi" (default) or "en"
+    #[serde(default = "default_language")]
+    pub language: String,
+}
+
+fn default_language() -> String {
+    "vi".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

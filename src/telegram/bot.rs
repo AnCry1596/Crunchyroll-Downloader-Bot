@@ -1,18 +1,17 @@
 use crate::config::Config;
-use crate::crunchyroll::types::{Episode, StreamResponse, Version};
+use crate::crunchyroll::types::{Episode, StreamResponse, SubtitleTrack, Version};
 use crate::crunchyroll::CrunchyrollClient;
 use crate::database::models::{AdminUser, AuthorizedChat};
 use crate::database::Database;
 use crate::download::DownloadManager;
 use crate::drm::WidevineCdm;
 use crate::error::Result;
+use crate::i18n::{Lang, Strings};
 use crate::telegram::callbacks::handle_callback;
-// use crate::telegram::commands::{parse_crunchyroll_input, Command, ContentType, build_welcome_message, build_help_message, build_not_authorized_message, build_donate_message};
-// use crate::telegram::keyboards::{
-//     episode_actions_keyboard, episode_actions_keyboard_with_pixeldrain, episodes_keyboard, search_results_keyboard, seasons_keyboard,
-// };
-use crate::telegram::commands::{Command, build_welcome_message, build_help_message, build_not_authorized_message, build_donate_message};
-use crate::telegram::keyboards::search_results_keyboard;
+use crate::telegram::commands::{parse_crunchyroll_input, Command, ContentType, build_welcome_message, build_help_message, build_not_authorized_message, build_donate_message};
+use crate::telegram::keyboards::{
+    episode_actions_keyboard, episode_actions_keyboard_with_pixeldrain, episodes_keyboard, search_results_keyboard, seasons_keyboard,
+};
 
 use crate::tools::ToolManager;
 use std::collections::HashMap;
@@ -40,6 +39,8 @@ pub struct AudioSelectionState {
     pub episode_id: String,
     pub playback: StreamResponse,
     pub episode: Episode,
+    /// Subtitles collected from all version playbacks (pre-fetched, de-duped)
+    pub all_subtitles: Vec<SubtitleTrack>,
 }
 
 /// Shared bot state
@@ -61,6 +62,10 @@ pub struct BotState {
     /// Maximum file size for direct Telegram upload (bytes)
     /// 50MB if no api_url, 100MB if behind Cloudflare, 2048MB if own server
     pub telegram_max_upload_bytes: u64,
+    /// UI language strings
+    pub strings: &'static Strings,
+    /// Bot display name fetched from Telegram API
+    pub bot_name: String,
 }
 
 impl BotState {
@@ -71,7 +76,10 @@ impl BotState {
         config: Config,
         database: Option<Database>,
         telegram_max_upload_bytes: u64,
+        bot_name: String,
     ) -> Self {
+        let lang = Lang::from_str(&config.telegram.language);
+        let strings = Strings::get(&lang);
         Self {
             cr_client,
             download_manager: Arc::new(download_manager),
@@ -84,6 +92,8 @@ impl BotState {
             download_subscribers: RwLock::new(HashMap::new()),
             audio_selections: RwLock::new(HashMap::new()),
             telegram_max_upload_bytes,
+            strings,
+            bot_name,
         }
     }
 
@@ -407,7 +417,8 @@ pub async fn run_bot(config: Config) -> Result<()> {
 
     // Cleanup active downloads and notify users on startup
     if let Some(ref db) = database {
-        cleanup_active_downloads_and_notify(&bot, db).await;
+        let startup_strings = Strings::get(&Lang::from_str(&config.telegram.language));
+        cleanup_active_downloads_and_notify(&bot, db, startup_strings).await;
     }
 
     // Initialize download manager
@@ -423,6 +434,13 @@ pub async fn run_bot(config: Config) -> Result<()> {
     // Detect Telegram upload size limit based on api_url / Cloudflare presence
     let telegram_max_upload_bytes = detect_telegram_upload_limit(config.telegram.api_url.as_deref()).await;
 
+    // Fetch bot display name from Telegram
+    let bot_name = match bot.get_me().await {
+        Ok(me) => me.full_name(),
+        Err(_) => "Bot".to_string(),
+    };
+    tracing::info!("Bot name: {}", bot_name);
+
     // Create shared state
     let state = Arc::new(BotState::new(
         cr_client,
@@ -431,6 +449,7 @@ pub async fn run_bot(config: Config) -> Result<()> {
         config,
         database,
         telegram_max_upload_bytes,
+        bot_name,
     ));
 
     // Spawn background update checker:
@@ -439,6 +458,7 @@ pub async fn run_bot(config: Config) -> Result<()> {
     {
         let bot_clone = bot.clone();
         let owner_ids: Vec<i64> = state.config.telegram.owner_users.iter().map(|o| o.id).collect();
+        let owner_lang = state.config.telegram.language.clone();
         tokio::spawn(async move {
             const CHECK_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(86400); // 1 day
             const SPAM_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(120);   // 2 min
@@ -448,10 +468,11 @@ pub async fn run_bot(config: Config) -> Result<()> {
                 match check_for_update().await {
                     Some((tag, url)) => {
                         tracing::warn!("New version available: {} — {}", tag, url);
-                        let msg = format!(
-                            "🆕 *Có phiên bản mới\\!*\n\nPhiên bản hiện tại: `v{}`\nPhiên bản mới: `{}`\n\n[Tải xuống tại đây]({})",
-                            CURRENT_VERSION, tag, url
-                        );
+                        let strings = crate::i18n::Strings::get(&crate::i18n::Lang::from_str(&owner_lang));
+                        let msg = strings.update_available
+                            .replace("{cur}", CURRENT_VERSION)
+                            .replace("{tag}", &tag)
+                            .replace("{url}", &url);
                         // Spam every 2 minutes until next daily check
                         let spam_count = CHECK_INTERVAL.as_secs() / SPAM_INTERVAL.as_secs();
                         for _ in 0..spam_count {
@@ -518,11 +539,13 @@ async fn handle_command(
 
     let chat_id_raw = msg.chat.id.0;
 
+    let s = state.strings;
+
     // Admin commands - check permission separately
     match &cmd {
         Command::AddAdmin | Command::RemoveAdmin => {
             if !state.is_owner(user_id) {
-                bot.send_message(msg.chat.id, "🚫 Chỉ owner mới có thể sử dụng lệnh này.")
+                bot.send_message(msg.chat.id, s.owner_only)
                     .reply_parameters(ReplyParameters::new(msg_id))
                     .await?;
                 return Ok(());
@@ -530,7 +553,7 @@ async fn handle_command(
         }
         Command::Authorize | Command::Deauthorize => {
             if !state.is_owner_or_admin(user_id).await {
-                bot.send_message(msg.chat.id, "🚫 Chỉ owner hoặc admin mới có thể sử dụng lệnh này.")
+                bot.send_message(msg.chat.id, s.owner_or_admin_only)
                     .reply_parameters(ReplyParameters::new(msg_id))
                     .await?;
                 return Ok(());
@@ -539,7 +562,7 @@ async fn handle_command(
         _ => {
             // Check general access permission
             if !state.is_allowed(user_id, chat_id_raw).await {
-                let not_authorized_msg = build_not_authorized_message(&state.config.telegram.owner_users);
+                let not_authorized_msg = build_not_authorized_message(&state.config.telegram.owner_users, s);
                 bot.send_message(msg.chat.id, not_authorized_msg)
                     .reply_parameters(ReplyParameters::new(msg_id))
                     .await?;
@@ -550,7 +573,7 @@ async fn handle_command(
 
     match cmd {
         Command::Start => {
-            let welcome_msg = build_welcome_message(&state.config.telegram.owner_users);
+            let welcome_msg = build_welcome_message(&state.config.telegram.owner_users, &state.bot_name, s);
             bot.send_message(msg.chat.id, welcome_msg)
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                 .reply_parameters(ReplyParameters::new(msg_id))
@@ -558,7 +581,7 @@ async fn handle_command(
         }
 
         Command::Help => {
-            let help_msg = build_help_message(&state.config.telegram.owner_users);
+            let help_msg = build_help_message(&state.config.telegram.owner_users, &state.bot_name, s);
             bot.send_message(msg.chat.id, help_msg)
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                 .reply_parameters(ReplyParameters::new(msg_id))
@@ -570,10 +593,7 @@ async fn handle_command(
             let search_term = text.strip_prefix("/search").unwrap_or("").trim();
 
             if search_term.is_empty() {
-                bot.send_message(
-                    msg.chat.id,
-                    "⚠️ Vui lòng nhập từ khóa tìm kiếm.\n\n📝 Ví dụ: /search Attack on Titan",
-                )
+                bot.send_message(msg.chat.id, s.search_empty)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
             } else {
@@ -581,34 +601,31 @@ async fn handle_command(
             }
         }
 
-        // Command::Get => {
-        //     let text = msg.text().unwrap_or_default();
-        //     let input = text.strip_prefix("/get").unwrap_or("").trim();
+        Command::Get => {
+            let text = msg.text().unwrap_or_default();
+            let input = text.strip_prefix("/get").unwrap_or("").trim();
 
-        //     if input.is_empty() {
-        //         bot.send_message(
-        //             msg.chat.id,
-        //             "⚠️ Vui lòng cung cấp ID hoặc URL.\n\n📝 Ví dụ:\n/get GRMG8ZQZR (ID series)\n/get GZ7UV1EPW (ID tập phim)\n/get https://www.crunchyroll.com/series/GRMG8ZQZR/one-piece",
-        //         )
-        //         .reply_parameters(ReplyParameters::new(msg_id))
-        //         .await?;
-        //     } else {
-        //         handle_get(&bot, msg.chat.id, msg_id, input, user_id, &state).await?;
-        //     }
-        // }
+            if input.is_empty() {
+                bot.send_message(msg.chat.id, s.get_empty)
+                .reply_parameters(ReplyParameters::new(msg_id))
+                .await?;
+            } else {
+                handle_get(&bot, msg.chat.id, msg_id, input, user_id, &state).await?;
+            }
+        }
 
         Command::Cancel => {
             state.download_manager.cancel();
-            bot.send_message(msg.chat.id, "❌ Đã huỷ thao tác.")
+            bot.send_message(msg.chat.id, s.cancelled_ok)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
 
         Command::Status => {
             let cr_status = if state.cr_client.is_authenticated().await {
-                "✅ Đã kết nối"
+                s.status_connected
             } else {
-                "❌ Ngắt kết nối"
+                s.status_disconnected
             };
 
             let owner_info = if state.config.telegram.owner_users.is_empty() {
@@ -621,10 +638,8 @@ async fn handle_command(
             };
 
             let status = format!(
-                "📊 *Trạng thái AnAlime Bot:*\n\n\
-                🔗 Kết nối: {}\n\
-                ✅ Sẵn sàng tải xuống{}",
-                cr_status,
+                "{}{}",
+                s.status_message.replace("{name}", &state.bot_name).replace("{cr}", cr_status),
                 owner_info
             );
 
@@ -634,7 +649,7 @@ async fn handle_command(
         }
 
         Command::Donate => {
-            let donate_msg = build_donate_message();
+            let donate_msg = build_donate_message(&state.bot_name, s);
             bot.send_message(msg.chat.id, donate_msg)
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                 .reply_parameters(ReplyParameters::new(msg_id))
@@ -642,6 +657,12 @@ async fn handle_command(
         }
 
         Command::Stats => {
+            if state.database.is_none() {
+                bot.send_message(msg.chat.id, s.stats_no_db)
+                    .reply_parameters(ReplyParameters::new(msg_id))
+                    .await?;
+                return Ok(());
+            }
             if let Some(ref db) = state.database {
                 match db.get_stats().await {
                     Ok(stats) => {
@@ -650,9 +671,9 @@ async fn handle_command(
 
                         // Build active downloads section with detailed progress
                         let active_downloads_section = if stats.active_downloads_list.is_empty() {
-                            "⏳ <b>Đang tải:</b> 0\n".to_string()
+                            format!("<b>{}</b> 0\n", s.stats_downloading)
                         } else {
-                            let mut section = format!("⏳ <b>Đang tải:</b> {}\n", stats.active_downloads_count);
+                            let mut section = format!("<b>{}</b> {}\n", s.stats_downloading, stats.active_downloads_count);
                             for dl in &stats.active_downloads_list {
                                 let title = if let Some(ref series) = dl.series_title {
                                     format!("{} - {}", series, dl.title)
@@ -707,51 +728,54 @@ async fn handle_command(
                         };
 
                         let stats_msg = format!(
-                            "📈 <b>Thống Kê AnAlime Bot</b>\n\n\
+                            "<b>{}</b>\n\n\
                             {}\n\
-                            👥 <b>Người dùng được phép:</b>\n\
-                            • Owner: {}\n\
-                            • Admin: {}\n\
-                            • Chat được cấp quyền: {}\n\
-                            • Tổng cộng: {}\n\n\
-                            🔐 <b>Episodes đã giải mã:</b> {}\n\n\
-                            📦 <b>Cache Telegram:</b>\n\
-                            • Files: {} ({:.2} GB)\n\
-                            • Đã phục vụ: {} lần\n\n\
-                            📦 <b>Cache Buzzheavier:</b>\n\
-                            • Files: {} ({:.2} GB)\n\
-                            • Đã phục vụ: {} lần\n\n\
-                            📦 <b>Cache Pixeldrain:</b>\n\
-                            • Files: {} ({:.2} GB)\n\
-                            • Đã phục vụ: {} lần\n\n\
-                            📦 <b>Cache Gofile:</b>\n\
-                            • Files: {} ({:.2} GB)\n\
-                            • Đã phục vụ: {} lần\n\n\
-                            📊 <b>Tổng kết:</b>\n\
-                            • Tổng files cached: {}\n\
-                            • Tổng dung lượng: {:.2} GB\n\
-                            • Tổng lượt phục vụ: {}",
+                            <b>{}</b>\n\
+                            • {}: {}\n\
+                            • {}: {}\n\
+                            • {}: {}\n\
+                            • {}: {}\n\n\
+                            <b>{}</b> {}\n\n\
+                            <b>{}</b>\n\
+                            • {}: {} ({:.2} GB)\n\
+                            • {}: {} {}\n\n\
+                            <b>{}</b>\n\
+                            • {}: {} ({:.2} GB)\n\
+                            • {}: {} {}\n\n\
+                            <b>{}</b>\n\
+                            • {}: {} ({:.2} GB)\n\
+                            • {}: {} {}\n\n\
+                            <b>{}</b>\n\
+                            • {}: {} ({:.2} GB)\n\
+                            • {}: {} {}\n\n\
+                            <b>{}</b>\n\
+                            • {}: {}\n\
+                            • {}: {:.2} GB\n\
+                            • {}: {}",
+                            s.stats_header.replace("{name}", &state.bot_name),
                             active_downloads_section,
-                            owner_count,
-                            stats.admin_count,
-                            stats.authorized_chat_count,
-                            total_authorized,
-                            stats.episodes_decrypted,
-                            stats.telegram_cache.file_count,
-                            stats.telegram_cache.total_size as f64 / 1_073_741_824.0,
-                            stats.telegram_cache.serve_count,
-                            stats.buzzheavier_cache.file_count,
-                            stats.buzzheavier_cache.total_size as f64 / 1_073_741_824.0,
-                            stats.buzzheavier_cache.serve_count,
-                            stats.pixeldrain_cache.file_count,
-                            stats.pixeldrain_cache.total_size as f64 / 1_073_741_824.0,
-                            stats.pixeldrain_cache.serve_count,
-                            stats.gofile_cache.file_count,
-                            stats.gofile_cache.total_size as f64 / 1_073_741_824.0,
-                            stats.gofile_cache.serve_count,
-                            stats.total_cached_files,
-                            stats.total_cached_size as f64 / 1_073_741_824.0,
-                            stats.total_serve_count
+                            s.stats_allowed_users,
+                            s.stats_owner, owner_count,
+                            s.stats_admin, stats.admin_count,
+                            s.stats_authorized_chats, stats.authorized_chat_count,
+                            s.stats_total, total_authorized,
+                            s.stats_episodes_decrypted, stats.episodes_decrypted,
+                            s.stats_cache_telegram,
+                            s.stats_files, stats.telegram_cache.file_count, stats.telegram_cache.total_size as f64 / 1_073_741_824.0,
+                            s.stats_served, stats.telegram_cache.serve_count, s.stats_times,
+                            s.stats_cache_buzzheavier,
+                            s.stats_files, stats.buzzheavier_cache.file_count, stats.buzzheavier_cache.total_size as f64 / 1_073_741_824.0,
+                            s.stats_served, stats.buzzheavier_cache.serve_count, s.stats_times,
+                            s.stats_cache_pixeldrain,
+                            s.stats_files, stats.pixeldrain_cache.file_count, stats.pixeldrain_cache.total_size as f64 / 1_073_741_824.0,
+                            s.stats_served, stats.pixeldrain_cache.serve_count, s.stats_times,
+                            s.stats_cache_gofile,
+                            s.stats_files, stats.gofile_cache.file_count, stats.gofile_cache.total_size as f64 / 1_073_741_824.0,
+                            s.stats_served, stats.gofile_cache.serve_count, s.stats_times,
+                            s.stats_summary,
+                            s.stats_total_files, stats.total_cached_files,
+                            s.stats_total_size, stats.total_cached_size as f64 / 1_073_741_824.0,
+                            s.stats_total_served, stats.total_serve_count
                         );
 
                         bot.send_message(msg.chat.id, stats_msg)
@@ -760,37 +784,33 @@ async fn handle_command(
                             .await?;
                     }
                     Err(e) => {
-                        bot.send_message(msg.chat.id, format!("❌ Lỗi khi lấy thống kê: {}", e))
+                        bot.send_message(msg.chat.id, format!("{}: {}", s.stats_error, e))
                             .reply_parameters(ReplyParameters::new(msg_id))
                             .await?;
                     }
                 }
-            } else {
-                bot.send_message(msg.chat.id, "❌ Database chưa được cấu hình. Không thể hiển thị thống kê.")
-                    .reply_parameters(ReplyParameters::new(msg_id))
-                    .await?;
             }
         }
 
         Command::Tools => {
             let statuses = state.tool_manager.check_tools().await;
 
-            let mut text = String::from("🔧 *Trạng thái công cụ:*\n\n");
+            let mut text = s.tools_header.to_string();
             for status in statuses {
                 let icon = if status.available { "✅" } else { "❌" };
                 let version = status.version.unwrap_or_else(|| "N/A".to_string());
                 let location = status
                     .path
                     .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "System PATH".to_string());
+                    .unwrap_or_else(|| s.system_path.to_string());
 
                 text.push_str(&format!(
-                    "{} *{}*\n  📌 Phiên bản: {}\n  📂 Vị trí: {}\n\n",
-                    icon, status.name, version, location
+                    "{} *{}*\n  {}: {}\n  {}: {}\n\n",
+                    icon, status.name, s.tools_version, version, s.tools_location, location
                 ));
             }
 
-            text.push_str("💡 Dùng /installtools để tải công cụ còn thiếu.");
+            text.push_str(s.tools_install_hint);
             bot.send_message(msg.chat.id, text)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
@@ -798,7 +818,7 @@ async fn handle_command(
 
         Command::InstallTools => {
             let msg_sent = bot
-                .send_message(msg.chat.id, "⏳ Đang kiểm tra và cài đặt công cụ...")
+                .send_message(msg.chat.id, s.tools_installing)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
 
@@ -807,7 +827,7 @@ async fn handle_command(
                     bot.edit_message_text(
                         msg.chat.id,
                         msg_sent.id,
-                        "✅ Tất cả công cụ đã được cài đặt thành công!\n\n💡 Dùng /tools để kiểm tra trạng thái.",
+                        s.tools_installed_ok,
                     )
                     .await?;
                 }
@@ -815,7 +835,7 @@ async fn handle_command(
                     bot.edit_message_text(
                         msg.chat.id,
                         msg_sent.id,
-                        format!("❌ Cài đặt công cụ thất bại: {}\n\n⚠️ Vui lòng cài đặt thủ công.", e),
+                        format!("{}: {}", s.tools_install_failed, e),
                     )
                     .await?;
                 }
@@ -869,8 +889,9 @@ async fn handle_search(
     user_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
+    let s = state.strings;
     let searching_msg = bot
-        .send_message(chat_id, format!("🔍 Đang tìm kiếm '{}'...", query))
+        .send_message(chat_id, format!("{} '{}'...", s.searching, query))
         .reply_parameters(ReplyParameters::new(reply_to))
         .await?;
 
@@ -880,7 +901,7 @@ async fn handle_search(
                 bot.edit_message_text(
                     chat_id,
                     searching_msg.id,
-                    format!("❌ Không tìm thấy kết quả cho '{}'", query),
+                    format!("{} '{}'", s.search_not_found, query),
                 )
                 .await?;
                 return Ok(());
@@ -890,7 +911,7 @@ async fn handle_search(
             bot.edit_message_text(
                 chat_id,
                 searching_msg.id,
-                format!("🎯 Tìm thấy {} kết quả cho '{}':", results.len(), query),
+                format!("{} {} results for '{}':", s.search_found, results.len(), query),
             )
             .reply_markup(keyboard)
             .await?;
@@ -899,7 +920,7 @@ async fn handle_search(
             bot.edit_message_text(
                 chat_id,
                 searching_msg.id,
-                format!("❌ Tìm kiếm thất bại: {}", e),
+                format!("{}: {}", s.search_error, e),
             )
             .await?;
         }
@@ -909,390 +930,329 @@ async fn handle_search(
 }
 
 // /// Handle /get command for direct ID or URL input
-// async fn handle_get(
-//     bot: &Bot,
-//     chat_id: ChatId,
-//     reply_to: MessageId,
-//     input: &str,
-//     user_id: i64,
-//     state: &BotState,
-// ) -> ResponseResult<()> {
-//     let loading_msg = bot
-//         .send_message(chat_id, format!("⏳ Đang tra cứu '{}'...", input))
-//         .reply_parameters(ReplyParameters::new(reply_to))
-//         .await?;
+async fn handle_get(
+    bot: &Bot,
+    chat_id: ChatId,
+    reply_to: MessageId,
+    input: &str,
+    user_id: i64,
+    state: &BotState,
+) -> ResponseResult<()> {
+    let s = state.strings;
+    let loading_msg = bot
+        .send_message(chat_id, format!("{} '{}'...", s.get_loading, input))
+        .reply_parameters(ReplyParameters::new(reply_to))
+        .await?;
 
-//     // Parse the input to determine content type
-//     let content_type = match parse_crunchyroll_input(input) {
-//         Some(ct) => ct,
-//         None => {
-//             bot.edit_message_text(
-//                 chat_id,
-//                 loading_msg.id,
-//                 "⚠️ Đầu vào không hợp lệ. Vui lòng cung cấp ID hoặc URL hợp lệ.\n\n📝 Ví dụ:\n/get GRMG8ZQZR (ID series)\n/get GZ7UV1EPW (ID tập phim)\n/get https://www.crunchyroll.com/watch/GVWU0XK4Y/episode-1",
-//             )
-//             .await?;
-//             return Ok(());
-//         }
-//     };
+    let content_type = match parse_crunchyroll_input(input) {
+        Some(ct) => ct,
+        None => {
+            bot.edit_message_text(chat_id, loading_msg.id, s.get_invalid_input)
+            .await?;
+            return Ok(());
+        }
+    };
 
-//     match content_type {
-//         ContentType::Series(id) => {
-//             handle_get_series(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
-//         }
-//         ContentType::Episode(id) => {
-//             // Try as episode first, then as series, then as movie
-//             handle_get_content(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
-//         }
-//         ContentType::Season(id) => {
-//             handle_get_season(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
-//         }
-//         ContentType::MovieListing(id) => {
-//             handle_get_movie_listing(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
-//         }
-//         ContentType::Movie(id) => {
-//             handle_get_movie(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
-//         }
-//     }
+    match content_type {
+        ContentType::Series(id) => {
+            handle_get_series(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
+        }
+        ContentType::Episode(id) => {
+            handle_get_content(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
+        }
+        ContentType::Season(id) => {
+            handle_get_season(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
+        }
+        ContentType::MovieListing(id) => {
+            handle_get_movie_listing(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
+        }
+        ContentType::Movie(id) => {
+            handle_get_movie(bot, chat_id, loading_msg.id, &id, user_id, state).await?;
+        }
+    }
 
-//     Ok(())
-// }
+    Ok(())
+}
 
-// /// Handle fetching a series by ID
-// async fn handle_get_series(
-//     bot: &Bot,
-//     chat_id: ChatId,
-//     msg_id: teloxide::types::MessageId,
-//     series_id: &str,
-//     user_id: i64,
-//     state: &BotState,
-// ) -> ResponseResult<()> {
-//     match state.cr_client.get_series(series_id).await {
-//         Ok(series) => {
-//             // Fetch seasons (uses US proxy automatically)
-//             match state.cr_client.get_seasons(series_id).await {
-//                 Ok(seasons) => {
-//                     if seasons.is_empty() {
-//                         bot.edit_message_text(
-//                             chat_id,
-//                             msg_id,
-//                             format!("❌ Không tìm thấy mùa phim nào cho '{}'", series.title),
-//                         )
-//                         .await?;
-//                         return Ok(());
-//                     }
+async fn handle_get_series(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    series_id: &str,
+    user_id: i64,
+    state: &BotState,
+) -> ResponseResult<()> {
+    let s = state.strings;
+    match state.cr_client.get_series(series_id).await {
+        Ok(series) => {
+            match state.cr_client.get_seasons(series_id).await {
+                Ok(seasons) => {
+                    if seasons.is_empty() {
+                        bot.edit_message_text(chat_id, msg_id, s.no_seasons).await?;
+                        return Ok(());
+                    }
 
-//                     let keyboard = seasons_keyboard(&seasons, series_id, user_id);
-//                     bot.edit_message_text(
-//                         chat_id,
-//                         msg_id,
-//                         format!("🎬 *{}*\n\n📁 Chọn một mùa phim:", series.title),
-//                     )
-//                     .reply_markup(keyboard)
-//                     .await?;
-//                 }
-//                 Err(e) => {
-//                     bot.edit_message_text(
-//                         chat_id,
-//                         msg_id,
-//                         format!("❌ Lỗi khi tải danh sách mùa: {}", e),
-//                     )
-//                     .await?;
-//                 }
-//             }
-//         }
-//         Err(_) => {
-//             // Not a series, return error
-//             bot.edit_message_text(
-//                 chat_id,
-//                 msg_id,
-//                 format!("❌ Không tìm thấy series '{}'", series_id),
-//             )
-//             .await?;
-//         }
-//     }
-//     Ok(())
-// }
+                    let keyboard = seasons_keyboard(&seasons, series_id, user_id, s);
+                    bot.edit_message_text(
+                        chat_id,
+                        msg_id,
+                        format!("📺 *{}*\n\n{}", series.title, s.seasons_select),
+                    )
+                    .reply_markup(keyboard)
+                    .await?;
+                }
+                Err(e) => {
+                    bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.seasons_error, e)).await?;
+                }
+            }
+        }
+        Err(_) => {
+            bot.edit_message_text(chat_id, msg_id, format!("{} '{}'", s.get_not_found, series_id)).await?;
+        }
+    }
+    Ok(())
+}
 
-// /// Handle fetching content by ID (tries episode, series, movie)
-// async fn handle_get_content(
-//     bot: &Bot,
-//     chat_id: ChatId,
-//     msg_id: teloxide::types::MessageId,
-//     id: &str,
-//     user_id: i64,
-//     state: &BotState,
-// ) -> ResponseResult<()> {
-//     // Try as episode first
-//     if let Ok(episode) = state.cr_client.get_episode(id).await {
-//         let series_title = episode.series_title.as_deref().unwrap_or("Không rõ");
-//         let season_title = episode.season_title.as_deref().unwrap_or("Không rõ");
-//         let episode_title = &episode.title;
+async fn handle_get_content(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    id: &str,
+    user_id: i64,
+    state: &BotState,
+) -> ResponseResult<()> {
+    let s = state.strings;
+    if let Ok(episode) = state.cr_client.get_episode(id).await {
+        let series_title = episode.series_title.as_deref().unwrap_or(s.unknown_field);
+        let season_title = episode.season_title.as_deref().unwrap_or(s.unknown_field);
+        let episode_title = &episode.title;
 
-//         let info = format!(
-//             "📺 {} | 📁 {}\n\n\
-//             🎬 {}\n\n\
-//             🔢 Tập: {}\n\
-//             ⏱ Thời lượng: {}\n\
-//             🔊 Âm thanh: {}\n\n\
-//             📝 {}",
-//             series_title,
-//             season_title,
-//             episode_title,
-//             episode.display_number(),
-//             episode.duration_formatted(),
-//             episode.audio_locale.as_deref().unwrap_or("Không rõ"),
-//             episode.description.as_deref().unwrap_or("Không có mô tả"),
-//         );
+        let info = format!(
+            "📺 {} | 📁 {}\n\n\
+            🎬 {}\n\n\
+            {}: {}\n\
+            {}: {}\n\
+            {}: {}\n\n\
+            📝 {}",
+            series_title,
+            season_title,
+            episode_title,
+            s.field_episode, episode.display_number(),
+            s.field_duration, episode.duration_formatted(),
+            s.field_audio, episode.audio_locale.as_deref().unwrap_or(s.unknown_field),
+            episode.description.as_deref().unwrap_or(s.no_description),
+        );
 
-//         // Check if Pixeldrain is enabled
-//         let pixeldrain_enabled = state.config.download.pixeldrain_api_key.is_some();
-//         let keyboard = episode_actions_keyboard_with_pixeldrain(id, episode.season_id.as_deref().unwrap_or(""), pixeldrain_enabled, user_id);
-//         bot.edit_message_text(chat_id, msg_id, info)
-//             .reply_markup(keyboard)
-//             .await?;
-//         return Ok(());
-//     }
+        let pixeldrain_enabled = state.config.download.pixeldrain_api_key.is_some();
+        let keyboard = episode_actions_keyboard_with_pixeldrain(id, episode.season_id.as_deref().unwrap_or(""), pixeldrain_enabled, user_id, s);
+        bot.edit_message_text(chat_id, msg_id, info)
+            .reply_markup(keyboard)
+            .await?;
+        return Ok(());
+    }
 
-//     // Try as series
-//     if let Ok(series) = state.cr_client.get_series(id).await {
-//         match state.cr_client.get_seasons(id).await {
-//             Ok(seasons) => {
-//                 if seasons.is_empty() {
-//                     bot.edit_message_text(
-//                         chat_id,
-//                         msg_id,
-//                         format!("❌ Không tìm thấy mùa phim nào cho '{}'", series.title),
-//                     )
-//                     .await?;
-//                     return Ok(());
-//                 }
+    if let Ok(series) = state.cr_client.get_series(id).await {
+        match state.cr_client.get_seasons(id).await {
+            Ok(seasons) => {
+                if seasons.is_empty() {
+                    bot.edit_message_text(chat_id, msg_id, s.no_seasons).await?;
+                    return Ok(());
+                }
 
-//                 let keyboard = seasons_keyboard(&seasons, id, user_id);
-//                 bot.edit_message_text(
-//                     chat_id,
-//                     msg_id,
-//                     format!("🎬 *{}*\n\n📁 Chọn một mùa phim:", series.title),
-//                 )
-//                 .reply_markup(keyboard)
-//                 .await?;
-//                 return Ok(());
-//             }
-//             Err(e) => {
-//                 bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải danh sách mùa: {}", e))
-//                     .await?;
-//                 return Ok(());
-//             }
-//         }
-//     }
+                let keyboard = seasons_keyboard(&seasons, id, user_id, s);
+                bot.edit_message_text(
+                    chat_id,
+                    msg_id,
+                    format!("📺 *{}*\n\n{}", series.title, s.seasons_select),
+                )
+                .reply_markup(keyboard)
+                .await?;
+                return Ok(());
+            }
+            Err(e) => {
+                bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.seasons_error, e)).await?;
+                return Ok(());
+            }
+        }
+    }
 
-//     // Try as movie listing
-//     if let Ok(movie_listing) = state.cr_client.get_movie_listing(id).await {
-//         match state.cr_client.get_movies(id).await {
-//             Ok(movies) => {
-//                 if movies.is_empty() {
-//                     bot.edit_message_text(
-//                         chat_id,
-//                         msg_id,
-//                         format!("❌ Không tìm thấy phim nào cho '{}'", movie_listing.title),
-//                     )
-//                     .await?;
-//                     return Ok(());
-//                 }
+    if let Ok(_movie_listing) = state.cr_client.get_movie_listing(id).await {
+        match state.cr_client.get_movies(id).await {
+            Ok(movies) => {
+                if movies.is_empty() {
+                    bot.edit_message_text(chat_id, msg_id, s.no_movies).await?;
+                    return Ok(());
+                }
 
-//                 // For movie listings, show the first movie directly
-//                 let movie = &movies[0];
-//                 let info = format!(
-//                     "🎬 *{}*\n\n\
-//                     ⏱ Thời lượng: {}\n\
-//                     🔊 Âm thanh: {}\n\n\
-//                     📝 {}",
-//                     movie.title,
-//                     movie.duration_formatted(),
-//                     movie.audio_locale.as_deref().unwrap_or("Không rõ"),
-//                     movie.description.as_deref().unwrap_or("Không có mô tả"),
-//                 );
+                let movie = &movies[0];
+                let info = format!(
+                    "🎬 *{}*\n\n\
+                    {}: {}\n\
+                    {}: {}\n\n\
+                    📝 {}",
+                    movie.title,
+                    s.field_duration, movie.duration_formatted(),
+                    s.field_audio, movie.audio_locale.as_deref().unwrap_or(s.unknown_field),
+                    movie.description.as_deref().unwrap_or(s.no_description),
+                );
 
-//                 let keyboard = episode_actions_keyboard(&movie.id, "", user_id);
-//                 bot.edit_message_text(chat_id, msg_id, info)
-//                     .reply_markup(keyboard)
-//                     .await?;
-//                 return Ok(());
-//             }
-//             Err(e) => {
-//                 bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải phim: {}", e))
-//                     .await?;
-//                 return Ok(());
-//             }
-//         }
-//     }
+                let keyboard = episode_actions_keyboard(&movie.id, "", user_id, s);
+                bot.edit_message_text(chat_id, msg_id, info)
+                    .reply_markup(keyboard)
+                    .await?;
+                return Ok(());
+            }
+            Err(e) => {
+                bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.movie_error, e)).await?;
+                return Ok(());
+            }
+        }
+    }
 
-//     // Try as movie directly
-//     if let Ok(movie) = state.cr_client.get_movie(id).await {
-//         let info = format!(
-//             "🎬 *{}*\n\n\
-//             ⏱ Thời lượng: {}\n\
-//             🔊 Âm thanh: {}\n\n\
-//             📝 {}",
-//             movie.title,
-//             movie.duration_formatted(),
-//             movie.audio_locale.as_deref().unwrap_or("Không rõ"),
-//             movie.description.as_deref().unwrap_or("Không có mô tả"),
-//         );
+    if let Ok(movie) = state.cr_client.get_movie(id).await {
+        let info = format!(
+            "🎬 *{}*\n\n\
+            {}: {}\n\
+            {}: {}\n\n\
+            📝 {}",
+            movie.title,
+            s.field_duration, movie.duration_formatted(),
+            s.field_audio, movie.audio_locale.as_deref().unwrap_or(s.unknown_field),
+            movie.description.as_deref().unwrap_or(s.no_description),
+        );
 
-//         let keyboard = episode_actions_keyboard(id, "", user_id);
-//         bot.edit_message_text(chat_id, msg_id, info)
-//             .reply_markup(keyboard)
-//             .await?;
-//         return Ok(());
-//     }
+        let keyboard = episode_actions_keyboard(id, "", user_id, s);
+        bot.edit_message_text(chat_id, msg_id, info)
+            .reply_markup(keyboard)
+            .await?;
+        return Ok(());
+    }
 
-//     // Nothing found
-//     bot.edit_message_text(
-//         chat_id,
-//         msg_id,
-//         format!(
-//             "❌ Không tìm thấy nội dung '{}'.\n\n⚠️ Hãy đảm bảo bạn đang sử dụng ID hoặc URL hợp lệ.",
-//             id
-//         ),
-//     )
-//     .await?;
+    bot.edit_message_text(chat_id, msg_id, format!("{} '{}'.", s.get_not_found, id)).await?;
 
-//     Ok(())
-// }
+    Ok(())
+}
 
-// /// Handle fetching a season by ID
-// async fn handle_get_season(
-//     bot: &Bot,
-//     chat_id: ChatId,
-//     msg_id: teloxide::types::MessageId,
-//     season_id: &str,
-//     user_id: i64,
-//     state: &BotState,
-// ) -> ResponseResult<()> {
-//     match state.cr_client.get_episodes(season_id).await {
-//         Ok(episodes) => {
-//             if episodes.is_empty() {
-//                 bot.edit_message_text(chat_id, msg_id, "❌ Không tìm thấy tập phim nào cho mùa này.")
-//                     .await?;
-//                 return Ok(());
-//             }
+async fn handle_get_season(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    season_id: &str,
+    user_id: i64,
+    state: &BotState,
+) -> ResponseResult<()> {
+    let s = state.strings;
+    match state.cr_client.get_episodes(season_id).await {
+        Ok(episodes) => {
+            if episodes.is_empty() {
+                bot.edit_message_text(chat_id, msg_id, s.no_episodes_season).await?;
+                return Ok(());
+            }
 
-//             // Get series and season title from first episode
-//             let series_title = episodes.first()
-//                 .and_then(|ep| ep.series_title.clone())
-//                 .unwrap_or_else(|| "Không rõ".to_string());
-//             let season_title = episodes.first()
-//                 .and_then(|ep| ep.season_title.clone())
-//                 .unwrap_or_else(|| "Không rõ".to_string());
+            let series_title = episodes.first()
+                .and_then(|ep| ep.series_title.clone())
+                .unwrap_or_else(|| s.unknown_field.to_string());
+            let season_title = episodes.first()
+                .and_then(|ep| ep.season_title.clone())
+                .unwrap_or_else(|| s.unknown_field.to_string());
+            let series_id = episodes.first()
+                .and_then(|ep| ep.series_id.clone())
+                .unwrap_or_default();
 
-//             // Get series_id from first episode for back button
-//             let series_id = episodes.first()
-//                 .and_then(|ep| ep.series_id.clone())
-//                 .unwrap_or_default();
+            let keyboard = episodes_keyboard(&episodes, season_id, &series_id, 0, 8, user_id, s);
+            bot.edit_message_text(
+                chat_id,
+                msg_id,
+                format!(
+                    "📺 {}\n📁 {}\n\n{} ({}):",
+                    series_title, season_title, s.episodes_select, episodes.len()
+                ),
+            )
+            .reply_markup(keyboard)
+            .await?;
 
-//             let keyboard = episodes_keyboard(&episodes, season_id, &series_id, 0, 8, user_id);
-//             bot.edit_message_text(
-//                 chat_id,
-//                 msg_id,
-//                 format!(
-//                     "📺 {}\n📁 {}\n\n🎬 Tìm thấy {} tập phim:",
-//                     series_title, season_title, episodes.len()
-//                 ),
-//             )
-//             .reply_markup(keyboard)
-//             .await?;
+            state.cache_episodes(season_id.to_string(), episodes).await;
+        }
+        Err(e) => {
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.episodes_error, e)).await?;
+        }
+    }
+    Ok(())
+}
 
-//             // Cache episodes for pagination
-//             state
-//                 .cache_episodes(season_id.to_string(), episodes)
-//                 .await;
-//         }
-//         Err(e) => {
-//             bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải danh sách tập: {}", e))
-//                 .await?;
-//         }
-//     }
-//     Ok(())
-// }
+async fn handle_get_movie_listing(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    movie_listing_id: &str,
+    user_id: i64,
+    state: &BotState,
+) -> ResponseResult<()> {
+    let s = state.strings;
+    match state.cr_client.get_movies(movie_listing_id).await {
+        Ok(movies) => {
+            if movies.is_empty() {
+                bot.edit_message_text(chat_id, msg_id, s.no_movies).await?;
+                return Ok(());
+            }
 
-// /// Handle fetching a movie listing by ID
-// async fn handle_get_movie_listing(
-//     bot: &Bot,
-//     chat_id: ChatId,
-//     msg_id: teloxide::types::MessageId,
-//     movie_listing_id: &str,
-//     user_id: i64,
-//     state: &BotState,
-// ) -> ResponseResult<()> {
-//     match state.cr_client.get_movies(movie_listing_id).await {
-//         Ok(movies) => {
-//             if movies.is_empty() {
-//                 bot.edit_message_text(chat_id, msg_id, "❌ Không tìm thấy phim nào.")
-//                     .await?;
-//                 return Ok(());
-//             }
+            let movie = &movies[0];
+            let info = format!(
+                "🎬 *{}*\n\n\
+                {}: {}\n\
+                {}: {}\n\n\
+                📝 {}",
+                movie.title,
+                s.field_duration, movie.duration_formatted(),
+                s.field_audio, movie.audio_locale.as_deref().unwrap_or(s.unknown_field),
+                movie.description.as_deref().unwrap_or(s.no_description),
+            );
 
-//             // Show first movie
-//             let movie = &movies[0];
-//             let info = format!(
-//                 "🎬 *{}*\n\n\
-//                 ⏱ Thời lượng: {}\n\
-//                 🔊 Âm thanh: {}\n\n\
-//                 📝 {}",
-//                 movie.title,
-//                 movie.duration_formatted(),
-//                 movie.audio_locale.as_deref().unwrap_or("Không rõ"),
-//                 movie.description.as_deref().unwrap_or("Không có mô tả"),
-//             );
+            let keyboard = episode_actions_keyboard(&movie.id, "", user_id, s);
+            bot.edit_message_text(chat_id, msg_id, info)
+                .reply_markup(keyboard)
+                .await?;
+        }
+        Err(e) => {
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.movie_error, e)).await?;
+        }
+    }
+    Ok(())
+}
 
-//             let keyboard = episode_actions_keyboard(&movie.id, "", user_id);
-//             bot.edit_message_text(chat_id, msg_id, info)
-//                 .reply_markup(keyboard)
-//                 .await?;
-//         }
-//         Err(e) => {
-//             bot.edit_message_text(chat_id, msg_id, format!("❌ Lỗi khi tải phim: {}", e))
-//                 .await?;
-//         }
-//     }
-//     Ok(())
-// }
+async fn handle_get_movie(
+    bot: &Bot,
+    chat_id: ChatId,
+    msg_id: teloxide::types::MessageId,
+    movie_id: &str,
+    user_id: i64,
+    state: &BotState,
+) -> ResponseResult<()> {
+    let s = state.strings;
+    match state.cr_client.get_movie(movie_id).await {
+        Ok(movie) => {
+            let info = format!(
+                "🎬 *{}*\n\n\
+                {}: {}\n\
+                {}: {}\n\n\
+                📝 {}",
+                movie.title,
+                s.field_duration, movie.duration_formatted(),
+                s.field_audio, movie.audio_locale.as_deref().unwrap_or(s.unknown_field),
+                movie.description.as_deref().unwrap_or(s.no_description),
+            );
 
-// /// Handle fetching a movie by ID
-// async fn handle_get_movie(
-//     bot: &Bot,
-//     chat_id: ChatId,
-//     msg_id: teloxide::types::MessageId,
-//     movie_id: &str,
-//     user_id: i64,
-//     state: &BotState,
-// ) -> ResponseResult<()> {
-//     match state.cr_client.get_movie(movie_id).await {
-//         Ok(movie) => {
-//             let info = format!(
-//                 "🎬 *{}*\n\n\
-//                 ⏱ Thời lượng: {}\n\
-//                 🔊 Âm thanh: {}\n\n\
-//                 📝 {}",
-//                 movie.title,
-//                 movie.duration_formatted(),
-//                 movie.audio_locale.as_deref().unwrap_or("Không rõ"),
-//                 movie.description.as_deref().unwrap_or("Không có mô tả"),
-//             );
-
-//             let keyboard = episode_actions_keyboard(movie_id, "", user_id);
-//             bot.edit_message_text(chat_id, msg_id, info)
-//                 .reply_markup(keyboard)
-//                 .await?;
-//         }
-//         Err(e) => {
-//             bot.edit_message_text(chat_id, msg_id, format!("❌ Không tìm thấy phim: {}", e))
-//                 .await?;
-//         }
-//     }
-//     Ok(())
-// }
+            let keyboard = episode_actions_keyboard(movie_id, "", user_id, s);
+            bot.edit_message_text(chat_id, msg_id, info)
+                .reply_markup(keyboard)
+                .await?;
+        }
+        Err(e) => {
+            bot.edit_message_text(chat_id, msg_id, format!("{}: {}", s.movie_not_found, e)).await?;
+        }
+    }
+    Ok(())
+}
 
 /// Cleanup temp directories on startup (except tools folder)
 async fn cleanup_temp_directories(config: &Config) {
@@ -1360,7 +1320,7 @@ async fn cleanup_temp_directories(config: &Config) {
 }
 
 /// Cleanup active downloads and notify users that bot has restarted
-async fn cleanup_active_downloads_and_notify(bot: &Bot, db: &Database) {
+async fn cleanup_active_downloads_and_notify(bot: &Bot, db: &Database, strings: &'static crate::i18n::Strings) {
     tracing::info!("🧹 Cleaning up active downloads from previous session...");
 
     // Get all active downloads before clearing
@@ -1375,16 +1335,10 @@ async fn cleanup_active_downloads_and_notify(bot: &Bot, db: &Database) {
 
             // Notify each user that their download was interrupted
             for download in &active_downloads {
-                let message = format!(
-                    "⚠️ Bot đã được khởi động lại!\n\n\
-                    🎬 Tải xuống của bạn đã bị gián đoạn:\n\
-                    📺 {}\n\
-                    📊 Trạng thái: {} ({}%)\n\n\
-                    🔄 Nếu bạn vẫn cần tập này, vui lòng yêu cầu lại.",
-                    download.title,
-                    download.phase,
-                    download.progress
-                );
+                let message = strings.bot_restarted
+                    .replace("{title}", &download.title)
+                    .replace("{phase}", &download.phase)
+                    .replace("{pct}", &download.progress.to_string());
 
                 if let Err(e) = bot.send_message(ChatId(download.initiated_by), message).await {
                     tracing::warn!(
@@ -1447,11 +1401,12 @@ async fn handle_add_admin(
     owner_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
+    let s = state.strings;
     let msg_id = msg.id;
     let db = match &state.database {
         Some(db) => db,
         None => {
-            bot.send_message(msg.chat.id, "❌ Cơ sở dữ liệu chưa được cấu hình.")
+            bot.send_message(msg.chat.id, s.db_not_configured)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
             return Ok(());
@@ -1461,27 +1416,22 @@ async fn handle_add_admin(
     let (target_id, username) = match extract_target_user(msg) {
         Some(t) => t,
         None => {
-            bot.send_message(
-                msg.chat.id,
-                "⚠️ Vui lòng reply tin nhắn của người dùng hoặc nhập ID.\n\n📝 Cú pháp: /addadmin <user_id> hoặc reply tin nhắn"
-            )
+            bot.send_message(msg.chat.id, s.add_admin_usage)
             .reply_parameters(ReplyParameters::new(msg_id))
             .await?;
             return Ok(());
         }
     };
 
-    // Check if already owner
     if state.is_owner(target_id) {
-        bot.send_message(msg.chat.id, format!("ℹ️ User {} đã là owner rồi.", target_id))
+        bot.send_message(msg.chat.id, format!("{} {}", s.already_owner, target_id))
             .reply_parameters(ReplyParameters::new(msg_id))
             .await?;
         return Ok(());
     }
 
-    // Check if already admin
     if db.is_admin(target_id).await.unwrap_or(false) {
-        bot.send_message(msg.chat.id, format!("ℹ️ User {} đã là admin rồi.", target_id))
+        bot.send_message(msg.chat.id, format!("{} {}", s.already_admin, target_id))
             .reply_parameters(ReplyParameters::new(msg_id))
             .await?;
         return Ok(());
@@ -1492,12 +1442,12 @@ async fn handle_add_admin(
         Ok(_) => {
             let display = username.map(|u| format!("@{} ({})", u, target_id))
                 .unwrap_or_else(|| target_id.to_string());
-            bot.send_message(msg.chat.id, format!("✅ Đã thêm admin: {}", display))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.admin_added, display))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("❌ Lỗi khi thêm admin: {}", e))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.admin_add_error, e))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
@@ -1513,11 +1463,12 @@ async fn handle_remove_admin(
     _owner_id: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
+    let s = state.strings;
     let msg_id = msg.id;
     let db = match &state.database {
         Some(db) => db,
         None => {
-            bot.send_message(msg.chat.id, "❌ Cơ sở dữ liệu chưa được cấu hình.")
+            bot.send_message(msg.chat.id, s.db_not_configured)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
             return Ok(());
@@ -1527,10 +1478,7 @@ async fn handle_remove_admin(
     let (target_id, username) = match extract_target_user(msg) {
         Some(t) => t,
         None => {
-            bot.send_message(
-                msg.chat.id,
-                "⚠️ Vui lòng reply tin nhắn của người dùng hoặc nhập ID.\n\n📝 Cú pháp: /removeadmin <user_id> hoặc reply tin nhắn"
-            )
+            bot.send_message(msg.chat.id, s.remove_admin_usage)
             .reply_parameters(ReplyParameters::new(msg_id))
             .await?;
             return Ok(());
@@ -1541,17 +1489,17 @@ async fn handle_remove_admin(
         Ok(true) => {
             let display = username.map(|u| format!("@{} ({})", u, target_id))
                 .unwrap_or_else(|| target_id.to_string());
-            bot.send_message(msg.chat.id, format!("✅ Đã xoá admin: {}", display))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.admin_removed, display))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
         Ok(false) => {
-            bot.send_message(msg.chat.id, format!("ℹ️ User {} không phải admin.", target_id))
+            bot.send_message(msg.chat.id, format!("{} {}", s.admin_not_found, target_id))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("❌ Lỗi khi xoá admin: {}", e))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.admin_remove_error, e))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
@@ -1567,35 +1515,33 @@ async fn handle_authorize(
     authorized_by: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
+    let s = state.strings;
     let msg_id = msg.id;
     let db = match &state.database {
         Some(db) => db,
         None => {
-            bot.send_message(msg.chat.id, "❌ Cơ sở dữ liệu chưa được cấu hình.")
+            bot.send_message(msg.chat.id, s.db_not_configured)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
             return Ok(());
         }
     };
 
-    // Determine target chat_id
     let text = msg.text().unwrap_or_default();
     let parts: Vec<&str> = text.splitn(2, ' ').collect();
 
     let (target_chat_id, title) = if parts.len() > 1 {
-        // /authorize <chat_id> or /authorize <user_id>
         let arg = parts[1].trim();
         match arg.parse::<i64>() {
             Ok(id) => (id, None),
             Err(_) => {
-                bot.send_message(msg.chat.id, "⚠️ ID không hợp lệ.\n\n📝 Cú pháp: /authorize hoặc /authorize <chat_id>")
+                bot.send_message(msg.chat.id, s.authorize_usage)
                     .reply_parameters(ReplyParameters::new(msg_id))
                     .await?;
                 return Ok(());
             }
         }
     } else {
-        // No argument - authorize current chat
         let chat_title = if msg.chat.id.0 < 0 {
             msg.chat.title().map(|t| t.to_string())
         } else {
@@ -1604,9 +1550,8 @@ async fn handle_authorize(
         (msg.chat.id.0, chat_title)
     };
 
-    // Check if already authorized
     if db.is_chat_authorized(target_chat_id).await.unwrap_or(false) {
-        bot.send_message(msg.chat.id, format!("ℹ️ Chat {} đã được cấp quyền rồi.", target_chat_id))
+        bot.send_message(msg.chat.id, format!("{} {}", s.already_authorized, target_chat_id))
             .reply_parameters(ReplyParameters::new(msg_id))
             .await?;
         return Ok(());
@@ -1618,12 +1563,12 @@ async fn handle_authorize(
             let display = title
                 .map(|t| format!("{} ({})", t, target_chat_id))
                 .unwrap_or_else(|| target_chat_id.to_string());
-            bot.send_message(msg.chat.id, format!("✅ Đã cấp quyền cho chat: {}", display))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.authorized_ok, display))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("❌ Lỗi khi cấp quyền: {}", e))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.authorize_error, e))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
@@ -1639,18 +1584,18 @@ async fn handle_deauthorize(
     _authorized_by: i64,
     state: &BotState,
 ) -> ResponseResult<()> {
+    let s = state.strings;
     let msg_id = msg.id;
     let db = match &state.database {
         Some(db) => db,
         None => {
-            bot.send_message(msg.chat.id, "❌ Cơ sở dữ liệu chưa được cấu hình.")
+            bot.send_message(msg.chat.id, s.db_not_configured)
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
             return Ok(());
         }
     };
 
-    // Determine target chat_id
     let text = msg.text().unwrap_or_default();
     let parts: Vec<&str> = text.splitn(2, ' ').collect();
 
@@ -1659,30 +1604,29 @@ async fn handle_deauthorize(
         match arg.parse::<i64>() {
             Ok(id) => id,
             Err(_) => {
-                bot.send_message(msg.chat.id, "⚠️ ID không hợp lệ.\n\n📝 Cú pháp: /deauthorize hoặc /deauthorize <chat_id>")
+                bot.send_message(msg.chat.id, s.deauthorize_usage)
                     .reply_parameters(ReplyParameters::new(msg_id))
                     .await?;
                 return Ok(());
             }
         }
     } else {
-        // No argument - deauthorize current chat
         msg.chat.id.0
     };
 
     match db.deauthorize_chat(target_chat_id).await {
         Ok(true) => {
-            bot.send_message(msg.chat.id, format!("✅ Đã thu hồi quyền cho chat: {}", target_chat_id))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.deauthorized_ok, target_chat_id))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
         Ok(false) => {
-            bot.send_message(msg.chat.id, format!("ℹ️ Chat {} chưa được cấp quyền.", target_chat_id))
+            bot.send_message(msg.chat.id, format!("{} {}", s.not_authorized_chat, target_chat_id))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }
         Err(e) => {
-            bot.send_message(msg.chat.id, format!("❌ Lỗi khi thu hồi quyền: {}", e))
+            bot.send_message(msg.chat.id, format!("{}: {}", s.deauthorize_error, e))
                 .reply_parameters(ReplyParameters::new(msg_id))
                 .await?;
         }

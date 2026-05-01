@@ -686,56 +686,52 @@ impl CrunchyrollClient {
             message: "Failed to get playback with any token".to_string(),
         })?;
 
-        // Step 2: Try to get more subtitles from SEA if we don't already have many
-        // SEA region typically has more subtitle options
-        let current_subtitle_count = response.subtitles.len() + response.captions.len();
-
-        if current_subtitle_count < 5 && !self.proxy_manager.is_in_sea().await {
-            tracing::info!("Current subtitles: {}, trying SEA token for more subtitles", current_subtitle_count);
-
-            if let Ok(sea_token) = self.get_token_for_sea().await {
-                if let Ok(sea_response) = self.get_playback_with_client(direct_client, &sea_token, media_id).await {
-                    let sea_subtitle_count = sea_response.subtitles.len() + sea_response.captions.len();
-                    if sea_subtitle_count > current_subtitle_count {
-                        tracing::info!("SEA has more subtitles ({} vs {}), merging", sea_subtitle_count, current_subtitle_count);
-                        // Merge subtitles from SEA (add any we don't have)
-                        for (locale, track) in sea_response.subtitles {
-                            response.subtitles.entry(locale).or_insert(track);
-                        }
-                        for (locale, track) in sea_response.captions {
-                            response.captions.entry(locale).or_insert(track);
-                        }
-                    }
+        // Step 2: Always fetch SEA + US playback to merge versions and subtitles from all regions.
+        // SEA has vi-VN audio; US has en-US and others. Merge versions (audio list) and subtitles.
+        let merge_from_region = |response: &mut StreamResponse, other: StreamResponse, label: &str| {
+            let added_versions = if let Some(other_versions) = other.versions {
+                let existing_guids: std::collections::HashSet<_> = response.versions
+                    .as_ref()
+                    .map(|v| v.iter().filter_map(|x| x.guid.clone()).collect())
+                    .unwrap_or_default();
+                let new_versions: Vec<_> = other_versions.into_iter()
+                    .filter(|v| v.guid.as_ref().map(|g| !existing_guids.contains(g)).unwrap_or(false))
+                    .collect();
+                let count = new_versions.len();
+                if !new_versions.is_empty() {
+                    response.versions.get_or_insert_with(Vec::new).extend(new_versions);
                 }
+                count
+            } else { 0 };
+
+            let mut added_subs = 0;
+            for (locale, track) in other.subtitles {
+                if response.subtitles.insert(locale, track).is_none() { added_subs += 1; }
+            }
+            for (locale, track) in other.captions {
+                if response.captions.insert(locale, track).is_none() { added_subs += 1; }
+            }
+            tracing::info!("{}: merged {} new audio versions, {} new subtitles", label, added_versions, added_subs);
+        };
+
+        if let Ok(sea_token) = self.get_token_for_sea().await {
+            match self.get_playback_with_client(direct_client, &sea_token, media_id).await {
+                Ok(sea_response) => merge_from_region(&mut response, sea_response, "SEA"),
+                Err(e) => tracing::debug!("SEA playback fetch failed: {}", e),
             }
         }
 
-        // Step 3: Try US for even more subtitles if still low
-        let current_subtitle_count = response.subtitles.len() + response.captions.len();
-
-        if current_subtitle_count < 5 && !self.proxy_manager.is_in_us().await {
-            tracing::info!("Still only {} subtitles, trying US token for more", current_subtitle_count);
-
-            if let Ok(us_token) = self.get_token_for_us().await {
-                if let Ok(us_response) = self.get_playback_with_client(direct_client, &us_token, media_id).await {
-                    let us_subtitle_count = us_response.subtitles.len() + us_response.captions.len();
-                    if us_subtitle_count > current_subtitle_count {
-                        tracing::info!("US has more subtitles ({} vs {}), merging", us_subtitle_count, current_subtitle_count);
-                        // Merge subtitles from US
-                        for (locale, track) in us_response.subtitles {
-                            response.subtitles.entry(locale).or_insert(track);
-                        }
-                        for (locale, track) in us_response.captions {
-                            response.captions.entry(locale).or_insert(track);
-                        }
-                    }
-                }
+        if let Ok(us_token) = self.get_token_for_us().await {
+            match self.get_playback_with_client(direct_client, &us_token, media_id).await {
+                Ok(us_response) => merge_from_region(&mut response, us_response, "US"),
+                Err(e) => tracing::debug!("US playback fetch failed: {}", e),
             }
         }
 
         let final_subtitle_count = response.subtitles.len() + response.captions.len();
-        tracing::info!("Final playback response: stream URL present={}, subtitles={}",
-            response.url.is_some(), final_subtitle_count);
+        let final_version_count = response.versions.as_ref().map(|v| v.len()).unwrap_or(0);
+        tracing::info!("Final playback response: stream URL present={}, subtitles={}, audio versions={}",
+            response.url.is_some(), final_subtitle_count, final_version_count);
 
         Ok(response)
     }

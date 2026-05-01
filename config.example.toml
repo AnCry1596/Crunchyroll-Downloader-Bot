@@ -20,6 +20,9 @@ storage_chat_id = -1002386542694
 # Example: "http://127.0.0.1:8081" for local telegram-bot-api server
 api_url = ""
 
+# UI language: "vi" (Vietnamese, default) or "en" (English)
+language = "vi"
+
 [crunchyroll]
 # Your Crunchyroll account credentials
 email = "your@email.com"

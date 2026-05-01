@@ -54,6 +54,7 @@ Pre-built binaries are available on the [Releases](https://github.com/AnCry1596/
    - Set your Crunchyroll `email` and `password`
    - Set your MongoDB `connection_string` and `db_name`
    - Place your Widevine `client_id.bin` and `private_key.pem` and set the paths
+   - (Optional) Set `language = "en"` for English UI (default: `"vi"`)
    - (Optional) Add API keys for Pixeldrain, Buzzheavier, or Gofile
    - (Optional) Configure proxies for geo-restricted regions
 
@@ -76,6 +77,7 @@ See [config.example.toml](config.example.toml) for all available options with de
 | `[telegram]` | `bot_token` | Bot token from @BotFather |
 | `[telegram]` | `owner_users` | List of owner user IDs |
 | `[telegram]` | `storage_chat_id` | Group/channel ID for file caching |
+| `[telegram]` | `language` | UI language: `"vi"` (default) or `"en"` |
 | `[crunchyroll]` | `email` / `password` | Crunchyroll credentials |
 | `[crunchyroll]` | `preferred_audio` | Preferred audio languages in order |
 | `[download]` | `upload_preference` | `"telegram"` or `"service"` |

@@ -1,5 +1,6 @@
 use crate::crunchyroll::types::{Episode, SearchItem, Season, Version};
 use crate::drm::decrypt::Muxer;
+use crate::i18n::Strings;
 use teloxide::types::{InlineKeyboardButton, InlineKeyboardMarkup};
 
 /// Maximum button text length
@@ -32,17 +33,19 @@ pub fn search_results_keyboard(items: &[SearchItem], user_id: i64) -> InlineKeyb
 }
 
 /// Build keyboard for seasons (locked to user)
-pub fn seasons_keyboard(seasons: &[Season], series_id: &str, user_id: i64) -> InlineKeyboardMarkup {
+pub fn seasons_keyboard(seasons: &[Season], series_id: &str, user_id: i64, strings: &Strings) -> InlineKeyboardMarkup {
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = seasons
         .iter()
         .map(|s| {
             let season_num = s.season_sequence_number.or(s.season_number).unwrap_or(0);
             let ep_count = s.number_of_episodes.unwrap_or(0);
             let label = format!(
-                "📁 S{}: {} ({} tập)",
+                "{}{}: {} ({} {})",
+                strings.season_label,
                 season_num,
                 truncate(&s.title, 22),
-                ep_count
+                ep_count,
+                strings.season_episodes,
             );
             vec![InlineKeyboardButton::callback(
                 label,
@@ -51,9 +54,8 @@ pub fn seasons_keyboard(seasons: &[Season], series_id: &str, user_id: i64) -> In
         })
         .collect();
 
-    // Add back button
     buttons.push(vec![InlineKeyboardButton::callback(
-        "⬅️ Quay lại",
+        strings.kb_back,
         format!("back:search:{}", user_id),
     )]);
 
@@ -68,6 +70,7 @@ pub fn episodes_keyboard(
     page: usize,
     page_size: usize,
     user_id: i64,
+    strings: &Strings,
 ) -> InlineKeyboardMarkup {
     let start = page * page_size;
     let end = std::cmp::min(start + page_size, episodes.len());
@@ -77,7 +80,8 @@ pub fn episodes_keyboard(
         .iter()
         .map(|ep| {
             let label = format!(
-                "🎬 Tập {}: {} ({})",
+                "{} {}: {} ({})",
+                strings.ep_label,
                 ep.display_number(),
                 truncate(&ep.title, 20),
                 ep.duration_formatted()
@@ -89,13 +93,12 @@ pub fn episodes_keyboard(
         })
         .collect();
 
-    // Pagination buttons
     if total_pages > 1 {
         let mut nav_buttons = Vec::new();
 
         if page > 0 {
             nav_buttons.push(InlineKeyboardButton::callback(
-                "⬅️ Trước",
+                strings.kb_back,
                 format!("page:{}:{}:{}:{}", season_id, series_id, page - 1, user_id),
             ));
         }
@@ -107,7 +110,7 @@ pub fn episodes_keyboard(
 
         if page < total_pages - 1 {
             nav_buttons.push(InlineKeyboardButton::callback(
-                "Sau ➡️",
+                "➡️",
                 format!("page:{}:{}:{}:{}", season_id, series_id, page + 1, user_id),
             ));
         }
@@ -115,9 +118,8 @@ pub fn episodes_keyboard(
         buttons.push(nav_buttons);
     }
 
-    // Back button
     buttons.push(vec![InlineKeyboardButton::callback(
-        "⬅️ Quay lại danh sách mùa",
+        strings.kb_back_seasons,
         format!("series:{}:{}", series_id, user_id),
     )]);
 
@@ -125,8 +127,8 @@ pub fn episodes_keyboard(
 }
 
 /// Build keyboard for episode actions (locked to user)
-pub fn episode_actions_keyboard(episode_id: &str, season_id: &str, user_id: i64) -> InlineKeyboardMarkup {
-    episode_actions_keyboard_with_pixeldrain(episode_id, season_id, false, user_id)
+pub fn episode_actions_keyboard(episode_id: &str, season_id: &str, user_id: i64, strings: &Strings) -> InlineKeyboardMarkup {
+    episode_actions_keyboard_with_pixeldrain(episode_id, season_id, false, user_id, strings)
 }
 
 /// Build keyboard for episode actions with optional Pixeldrain (locked to user)
@@ -135,32 +137,30 @@ pub fn episode_actions_keyboard_with_pixeldrain(
     season_id: &str,
     pixeldrain_enabled: bool,
     user_id: i64,
+    strings: &Strings,
 ) -> InlineKeyboardMarkup {
     let mut buttons = vec![];
 
-    // Only show Pixeldrain if enabled, otherwise show Telegram
     if pixeldrain_enabled {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "📥 Tải xuống",
+            strings.kb_download,
             format!("pixeldrain:{}:{}", episode_id, user_id),
         )]);
     } else {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "📥 Tải xuống",
+            strings.kb_download,
             format!("download:{}:{}", episode_id, user_id),
         )]);
     }
 
-    // Only show back button if we have a valid season_id
     if !season_id.is_empty() {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "⬅️ Quay lại danh sách tập",
+            strings.kb_back_episodes,
             format!("back:season:{}:{}", season_id, user_id),
         )]);
     } else {
-        // No season context - offer new search
         buttons.push(vec![InlineKeyboardButton::callback(
-            "🔍 Tìm kiếm mới",
+            strings.kb_new_search,
             format!("back:search:{}", user_id),
         )]);
     }
@@ -174,26 +174,26 @@ pub fn episode_actions_keyboard_full(
     season_id: &str,
     series_id: &str,
     user_id: i64,
+    strings: &Strings,
 ) -> InlineKeyboardMarkup {
     let mut buttons = vec![vec![InlineKeyboardButton::callback(
-        "📥 Tải chất lượng cao nhất",
+        strings.kb_download,
         format!("download:{}:{}", episode_id, user_id),
     )]];
 
-    // Back button depends on what context we have
     if !season_id.is_empty() && !series_id.is_empty() {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "⬅️ Quay lại danh sách tập",
+            strings.kb_back_episodes,
             format!("season:{}:{}:{}", series_id, season_id, user_id),
         )]);
     } else if !series_id.is_empty() {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "⬅️ Quay lại danh sách mùa",
+            strings.kb_back_seasons,
             format!("series:{}:{}", series_id, user_id),
         )]);
     } else {
         buttons.push(vec![InlineKeyboardButton::callback(
-            "🔍 Tìm kiếm mới",
+            strings.kb_new_search,
             format!("back:search:{}", user_id),
         )]);
     }
@@ -202,9 +202,9 @@ pub fn episode_actions_keyboard_full(
 }
 
 /// Build keyboard for download progress (locked to user)
-pub fn download_progress_keyboard(task_id: &str, episode_id: &str, user_id: i64) -> InlineKeyboardMarkup {
+pub fn download_progress_keyboard(task_id: &str, episode_id: &str, user_id: i64, strings: &Strings) -> InlineKeyboardMarkup {
     let buttons = vec![vec![InlineKeyboardButton::callback(
-        "❌ Huỷ tải xuống",
+        strings.kb_cancel_download,
         format!("cancel:{}:{}:{}", task_id, episode_id, user_id),
     )]];
 
@@ -228,6 +228,7 @@ pub fn audio_selection_keyboard(
     selected_indices: &[usize],
     episode_id: &str,
     user_id: i64,
+    strings: &Strings,
 ) -> InlineKeyboardMarkup {
     let mut buttons: Vec<Vec<InlineKeyboardButton>> = Vec::new();
 
@@ -244,15 +245,13 @@ pub fn audio_selection_keyboard(
         buttons.push(vec![InlineKeyboardButton::callback(label, callback)]);
     }
 
-    // Confirm button with count
     let selected_count = selected_indices.len();
-    let confirm_label = format!("📥 Tải xuống ({} audio)", selected_count);
+    let confirm_label = format!("{} ({} audio)", strings.kb_confirm_download, selected_count);
     let confirm_callback = format!("ad:{}:{}", episode_id, user_id);
     buttons.push(vec![InlineKeyboardButton::callback(confirm_label, confirm_callback)]);
 
-    // Back button - go back to episode info
     buttons.push(vec![InlineKeyboardButton::callback(
-        "⬅️ Quay lại",
+        strings.kb_back,
         format!("episode:{}:{}", episode_id, user_id),
     )]);
 
