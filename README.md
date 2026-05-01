@@ -87,6 +87,10 @@ See [config.example.toml](config.example.toml) for all available options with de
 | `[database]` | `connection_string` | MongoDB connection URI |
 | `[proxy]` | `main_proxy` | Global proxy (optional) |
 
+## Acknowledgements
+
+Special thanks to [multi-downloader-nx](https://github.com/anidl/multi-downloader-nx) for the Crunchyroll API implementation that made this project possible.
+
 ## License
 
 [WTFPL](LICENSE) — Do What The Fuck You Want To Public License
