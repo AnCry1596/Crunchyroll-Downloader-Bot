@@ -5,8 +5,8 @@ edition = "2021"
 
 [dependencies]
 # HTTP client (existing)
-wreq = { version = "6.0.0-rc.28", features = ["socks", "json", "multipart", "hickory-dns", "charset", "cookies", "gzip", "brotli", "zstd", "deflate", "tracing", "query", "form"] }
-wreq-util = { version = "3.0.0-rc.10", features = ["emulation", "emulation-compression", "emulation-serde"] }
+wreq = { version = "6.0.0-rc", features = ["socks", "json", "multipart", "hickory-dns", "charset", "cookies", "gzip", "brotli", "zstd", "deflate", "tracing", "query", "form"] }
+wreq-util = { version = "3.0.0-rc", features = ["emulation", "emulation-compression", "emulation-serde"] }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
