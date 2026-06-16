@@ -17,8 +17,8 @@ pub const DISCOVER_BASE: &str = "/content/v2/discover";
 pub const LICENSE_WIDEVINE: &str = "https://cr-license-proxy.prd.crunchyrollsvc.com/v1/license/widevine";
 
 // Android TV device credentials
-pub const BASIC_AUTH: &str = "eTJhcnZqYjBoMHJndnRpemxvdnk6SlZMdndkSXBYdnhVLXFJQnZUMU04b1FUcjFxbFFKWDI=";
-pub const USER_AGENT: &str = "Crunchyroll/ANDROIDTV/3.59.0_22338 (Android 12; en-US; SHIELD Android TV Build/SR1A.211012.001)";
+pub const BASIC_AUTH: &str = "cmpzMGx0eDBkYndrbGl3eGR6ZGY6NFY3cmYyMS1VRlhlWi01WEFkMFhfUVB3cjFndV9pMXM=";
+pub const USER_AGENT: &str = "Crunchyroll/ANDROIDTV/3.65.0_22347 (Android 12; en-US; SHIELD Android TV Build/SR1A.211012.001)";
 pub const DEVICE_TYPE: &str = "Android TV";
 pub const DEVICE_NAME: &str = "Android TV";
 
